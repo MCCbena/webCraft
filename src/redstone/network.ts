@@ -161,15 +161,16 @@ export function computeDustTarget(world: World, x: number, y: number, z: number,
     if (idN === Block.RedstoneDust) {
       const sN = getStrength(world.getMeta(nx, y, nz));
       if (sN > 0) m = Math.max(m, sN - 1);
-      // LINE RULE (design.md §8.2(d), 1.13): dust C two blocks away in a
-      // straight line (dust N in between) passes WITHOUT decay when it is
-      // stronger than the intermediate dust N, else with 1 decay:
-      // pass = (sC > sN) ? sC : sC - 1 (for sC > 0).
+      // LINE RULE (design.md §8.2(d)): dust C two blocks away in a straight
+      // line (dust N in between) transmits full strength without decay ONLY
+      // when C is at full strength 15 — the line rule never raises C above
+      // what normal neighbor propagation would give (Phase 4b: the
+      // "sC > sN ? sC : sC - 1" formula was reverted; it produced
+      // 14,13,14,13,... zigzag lines and self-sustaining lines).
       const cx2 = x + 2 * FACING_X[f];
       const cz2 = z + 2 * FACING_Z[f];
-      if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust) {
-        const sC = getStrength(world.getMeta(cx2, y, cz2));
-        if (sC > 0) m = Math.max(m, sC > sN ? sC : sC - 1);
+      if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust && getStrength(world.getMeta(cx2, y, cz2)) === MAX_POWER) {
+        m = MAX_POWER;
       }
     } else if (idN === Block.Repeater || idN === Block.Comparator) {
       // Directional output: full strength, no decay, only toward the facing.

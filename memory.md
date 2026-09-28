@@ -90,6 +90,62 @@
 
 ---
 
+## Phase 4b 実装メモ (line rule REVERT — 再適用禁止)
+
+### 何が起きたか
+Phase 4 のラインルール `pass = (sC > sN) ? sC : sC - 1`(network.ts
+`computeDustTarget`)は **Java 1.13 に非準拠** と確定し、**Phase 2C の
+exactly-15 ルールに完全復帰**した。git 8066922(4b前= b01745d)からコード・
+コメント・テストをそのまま復元。
+
+### 復帰理由(再適用しないこと!)
+1. **ザグザグ均衡**: トーチの直線が 14,13,14,13,... で収束(真の 1.13 は
+   単調減衰 14,13,12,11,...)。ソース側の 2先は常に中間ダストより強いので、
+   全ダストがソース側強度を減衰なしで再受信してしまう。
+2. **自己持続ライン**: 一度点灯したラインは**トーチを除去しても消灯しない**
+   (真の 1.13 はソース除去で全ライン 0 へ排渇)。
+   → 必須要件「Java 1.13 レッドストーン」を両面で破っていた。
+
+### 復元したコード(network.ts computeDustTarget のラインルール)
+```ts
+if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust && getStrength(world.getMeta(cx2, y, cz2)) === MAX_POWER) {
+  m = MAX_POWER;
+}
+```
+つまり 2先 C 経由の寄与 = `sC === 15 ? 15 : (通常隣接伝播 sN-1 のみ)`。
+ラインルールが通常伝播を上回るのはフル強度 15 パススルーの場合だけ。
+
+### 変更ファイル
+- `src/redstone/network.ts`: ラインルールを exactly-15 に復元(+コメント)。
+- `src/redstone/types.ts`: ヘッダ NOTE を Phase 2C 文言に復元(4b の
+  警告を追加)。
+- `test/redstone.test.ts`:
+  - 減衰テスト → 単調 14,13,...,0(15個目=0)に復元
+  - 「sub-15 ラインパス」テスト**削除**(バグを固定化するテスト)
+  - **新規**「no self-sustain: removing the source fully drains the line
+    within a few ticks」(4ダスト列 → トーチ除去 → 全 0)
+  - リピータ「preserves input strength」→ back 入力 12 / 出力 12 に復元
+  - コンペア4テスト → back 12 系に復元(Phase 4 の持続挙動は**保持**)
+  - 決定論テスト → 出力 13 → **7** に復元
+  - 15 パススルーテスト(レッドストーンブロック上のダスト)は据え置き
+- `docs/design.md` §8.2: ラインルール文言を実装どおりの無歧義ルールに置換。
+- `memory.md`: 本節追加。
+
+### テスト結果
+- `npm test`: 全合格(件数は実行ログ参照)。`npm run build`: 合格。
+- `npm run verify`: verify-redstone.png で単調減衰(14,13,...,7)+
+  delay-1 リピータ出力 7 + ランプ点灯を確認。verify-terrain.png 不変。
+
+### 注意
+- Phase 4 の**他の修正(リピータ持続・落下ダメージ・ピストン上限・
+  強電力・DRY等)はすべて正しく保持**されている。本セクションはライン
+  ルール**のみ**の復元。
+- 「直線の減衰テストを緑にしたければ sC > sN パスが必要」という推論は
+  **誤り** — exactly-15 ルールは減衰テスト・15パススルーテストの両方を
+  緑にし、かつ 1.13 と整合する。
+
+---
+
 ## Phase 3 実装メモ (integration + render verification)
 
 ### 変更点(全ファイル)
@@ -169,6 +225,7 @@
 - [redstone] **Phase 2C 完了**: src/redstone/{types,network,components,tick}.ts(1.13仕様の電力モデル+固定点ダスト伝播+全コンポーネント、20TPS同期)、game.ts 統合(tickRedstone 実装・右クリックインタラクト・facing配置)、test/redstone.test.ts(32: §8.4 全シナリオ)。全152テスト合格、ビルド合格。詳細は「Phase 2C 実装メモ」節を参照
 - [integration] **Phase 3 完了**: 地形配線(game.ts 1行+import)、mesher 点灯タイル修正(repeater/comparator+ComparatorOn タイル48追加)、DRYアトラス抽出(src/engine/atlas.ts が renderer/icons 共用)、CPUラスタライザ(tools/、`npm run verify`、terrain+redstone の2枚スクリーンショット)、スモークテスト(test/verify.test.ts)。全158テスト合格、ビルド合格。詳細は「Phase 3 実装メモ」節を参照
 - [fixes] **Phase 4 完了**: レビュー指摘13項目全修正(リピータ持続/落下ダメージ/ピストン上限/extend再検証/ラインルール/トーチ強電力/アイル上限/メッシュ予算/placeTarget(hit)/256×256仕様確定 + DRY・マジックナンバー・デッドコード)。全160テスト合格、ビルド合格、verify 2枚目視確認。詳細は「Phase 4 実装メモ」節を参照
+- [fixes] **Phase 4b 完了**: ラインルールを Phase 2C の exactly-15 に**復帰**(4bの数式 `sC > sN ? sC : sC - 1` はザグザグ均衡+自己持続ラインを引き起こし 1.13 非準拠と確定)。テスト復元(減衰=単調14,13,...,0 / 決定論出力=7 / back入力=12)+ sub-15テスト削除 + 新規「no self-sustain」テスト。design.md §8.2 文言置換。詳細は「Phase 4b 実装メモ」節を参照
 
 ## Phase 1 実装メモ (Phase 2 チーム必読)
 

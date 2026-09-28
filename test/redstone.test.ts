@@ -97,37 +97,37 @@ const metaStrength = (w: World, x: number, y: number, z: number): number => getS
 // ---------------------------------------------------------------------------
 
 describe('dust propagation (1.13 fixed point)', () => {
-  it('torch line: 1.13 line-rule equilibrium is a 14,13,14,13,... zigzag', () => {
-    // Phase 4: with the 1.13 line rule (pass = sC > sN ? sC : sC - 1), the
-    // dust two blocks away TOWARD the source is always stronger than the
-    // intermediate dust, so every dust re-receives the source-side strength
-    // without decay and the line converges to a 2-step zigzag instead of a
-    // smooth 14,13,...,0 decay (the pre-Phase-4 test codified the old
-    // exactly-15 rule).
+  it('torch line decays exactly: dust #N = 14-(N-1), 15th dust is 0 (off)', () => {
     const h = makeHarness();
     h.place(0, 10, 0, Block.RedstoneTorch, 1); // on
     for (let n = 1; n <= 15; n++) h.place(n, 10, 0, Block.RedstoneDust);
     h.step(3); // converge
     for (let n = 1; n <= 15; n++) {
-      expect(metaStrength(h.world, n, 10, 0), `dust #${n}`).toBe(n % 2 === 1 ? 14 : 13);
+      expect(metaStrength(h.world, n, 10, 0), `dust #${n}`).toBe(14 - (n - 1));
     }
+    // exact boundary: the 15th dust carries 0 (off)
+    expect(h.strength(15, 10, 0)).toBe(0);
+    expect(h.strength(14, 10, 0)).toBe(1);
     // the torch stays lit (1.13: adjacent dust does not extinguish it)
     expect(isOn(h.world.getMeta(0, 10, 0))).toBe(true);
   });
 
-  it('line rule (sub-15): a far dust stronger than the intermediate passes without decay', () => {
-    // torch → 3 dust: dust #3 receives dust #1's strength (14) through dust
-    // #2 (13) WITHOUT the -1 decay (14 > 13). Under the old exactly-15 rule
-    // dust #3 would have settled at 12.
+  it('no self-sustain: removing the source fully drains the line within a few ticks', () => {
+    // 1.13: dust is not a power source of its own. The Phase 4 line rule
+    // (pass = sC > sN ? sC : sC - 1) made lines self-sustaining — removing
+    // the torch did not drain them (Phase 4b reverted to the exactly-15
+    // rule, so a line from a single source always decays back to 0).
     const h = makeHarness();
     h.place(0, 10, 0, Block.RedstoneTorch, 1); // on
-    h.place(1, 10, 0, Block.RedstoneDust);
-    h.place(2, 10, 0, Block.RedstoneDust);
-    h.place(3, 10, 0, Block.RedstoneDust);
-    h.step(3);
+    for (let n = 1; n <= 4; n++) h.place(n, 10, 0, Block.RedstoneDust);
+    h.step(3); // settle: 14,13,12,11
     expect(h.strength(1, 10, 0)).toBe(14);
-    expect(h.strength(2, 10, 0)).toBe(13);
-    expect(h.strength(3, 10, 0)).toBe(14); // sub-15 line pass
+    expect(h.strength(4, 10, 0)).toBe(11);
+    h.remove(0, 10, 0); // kill the source
+    h.step(3); // the whole line must drain to 0
+    for (let n = 1; n <= 4; n++) {
+      expect(h.strength(n, 10, 0), `dust #${n}`).toBe(0);
+    }
   });
 
   it('line rule: dust on redstone_block (=15) passes full strength to the dust two away', () => {
@@ -224,18 +224,16 @@ describe('repeater (1.13)', () => {
   });
 
   it('preserves input strength (weaker input → weaker output)', () => {
-    // Phase 4 line rule: the torch line settles to 14,13,14 — the back input
-    // at dust #3 is 14 (was 12 under the old exactly-15 line rule).
     const h = makeHarness();
     h.place(0, 10, 0, Block.RedstoneTorch, 1);
     h.place(1, 10, 0, Block.RedstoneDust); // 14
     h.place(2, 10, 0, Block.RedstoneDust); // 13
-    h.place(3, 10, 0, Block.RedstoneDust); // 14 (line pass from dust #1)
+    h.place(3, 10, 0, Block.RedstoneDust); // 12
     h.place(4, 10, 0, Block.Repeater, Facing.East); // delay 1
     h.place(5, 10, 0, Block.RedstoneDust);
-    h.step(3); // t0 settle, t1 sample(14), t2 output
-    expect(getRepeaterOut(h.world.getMeta(4, 10, 0))).toBe(14);
-    expect(h.strength(5, 10, 0)).toBe(14); // preserved, not re-boosted
+    h.step(3); // t0 settle, t1 sample(12), t2 output
+    expect(getRepeaterOut(h.world.getMeta(4, 10, 0))).toBe(12);
+    expect(h.strength(5, 10, 0)).toBe(12); // preserved, not re-boosted to 14
   });
 
   it('lock: input changes while output > 0 are ignored (sustain completes)', () => {
@@ -273,10 +271,7 @@ function comparatorFixture(mode: number, leverSide: 'north' | 'south'): Harness 
 }
 
 describe('comparator (1.13)', () => {
-  // Phase 4 note: the fixture's torch line settles to 14,13,14 under the
-  // 1.13 line rule, so the "back" input is 14 (was 12 under the old rule).
-
-  it('compare mode: output = max(back, side0, side1) — side (15) beats back (14), sustained', () => {
+  it('compare mode: output = max(back, side0, side1) — side (15) beats back (12), sustained', () => {
     const h = comparatorFixture(0, 'south');
     h.step(1); // t0: dust settles; side input (15) sampled — latency tick
     expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(0);
@@ -291,34 +286,31 @@ describe('comparator (1.13)', () => {
     }
     // input weakens → the output tracks it (re-sampled at each window end)
     h.world.setBlock(4, 10, 1, Block.Lever, 0); // side lever off
-    h.step(1); // re-samples: side 0, back 14 → output tracks down to 14
-    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(14);
+    h.step(1); // re-samples: side 0, back 12 → output tracks down to 12
+    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(12);
     // input removed → falls after the minimum-on time (comparator delay 1).
-    // (Note: under the 1.13 line rule the torch line is self-sustaining —
-    // removing the torch alone would NOT drain it — so the back dust itself
-    // is removed to kill the input.)
     h.remove(3, 10, 0);
     h.step(1); // re-samples: back air → 0 → off
     expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(0);
     expect(h.strength(5, 10, 0)).toBe(0);
   });
 
-  it('compare mode: back (14) with no side input → 14, sustained', () => {
+  it('compare mode: back (12) with no side input → 12, sustained', () => {
     const h = makeHarness();
     h.place(0, 10, 0, Block.RedstoneTorch, 1);
     h.place(1, 10, 0, Block.RedstoneDust);
     h.place(2, 10, 0, Block.RedstoneDust);
-    h.place(3, 10, 0, Block.RedstoneDust); // 14 (line pass from dust #1)
+    h.place(3, 10, 0, Block.RedstoneDust); // 12
     h.place(4, 10, 0, Block.Comparator, Facing.East);
     h.place(5, 10, 0, Block.RedstoneDust);
     h.step(3);
-    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(14);
-    expect(h.strength(5, 10, 0)).toBe(14);
+    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(12);
+    expect(h.strength(5, 10, 0)).toBe(12);
     h.step(5); // sustained while the input persists
-    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(14);
+    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(12);
   });
 
-  it('subtract mode: back - side clamped at 0 (14 - 15 → 0)', () => {
+  it('subtract mode: back - side clamped at 0 (12 - 15 → 0)', () => {
     const h = comparatorFixture(1, 'north'); // side0 = north = 15
     h.step(3);
     expect(getMode(h.world.getMeta(4, 10, 0))).toBe(1);
@@ -326,11 +318,11 @@ describe('comparator (1.13)', () => {
     expect(h.strength(5, 10, 0)).toBe(0);
   });
 
-  it('subtract mode: back - side with side < back (14 - 0 → 14)', () => {
+  it('subtract mode: back - side with side < back (12 - 0 → 12)', () => {
     const h = comparatorFixture(1, 'south'); // side1 = south; subtract uses side0 (north = 0)
     h.step(3);
-    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(14);
-    expect(h.strength(5, 10, 0)).toBe(14);
+    expect(getOutput(h.world.getMeta(4, 10, 0))).toBe(12);
+    expect(h.strength(5, 10, 0)).toBe(12);
   });
 });
 
@@ -630,10 +622,10 @@ describe('determinism', () => {
       expect(a.strength(n, 10, 0)).toBe(b.strength(n, 10, 0));
     }
     expect(isOn(a.world.getMeta(11, 10, 0))).toBe(isOn(b.world.getMeta(11, 10, 0)));
-    // sanity: the circuit is actually live. Phase 4 line rule: the torch
-    // line settles to the 14,13,... zigzag, so the repeater input (dust #8)
-    // is 13 and the sustained output is 13 (was 7 under the old rule).
+    // sanity: the circuit is actually live. The torch line decays
+    // monotonically (14,13,...), so the repeater input (dust #8) is 7 and
+    // the sustained output (dust #10) is 7.
     expect(a.strength(1, 10, 0)).toBe(14);
-    expect(a.strength(10, 10, 0)).toBe(13);
+    expect(a.strength(10, 10, 0)).toBe(7);
   });
 });

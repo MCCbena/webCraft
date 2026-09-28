@@ -12,14 +12,17 @@
  *   - comparator:      bits 0-1 facing, bit 2 mode, bits 3-6 output
  *   - torch/lamp/lever/button/plate: bit 0 = on
  *
- * NOTE on the 1.13 "line rule" (design.md §8.2(d)): Phase 4 — a dust C two
- * blocks away in a straight line (Dust D ← Dust N ← Dust C) passes to D
- * without decay when C is STRONGER than the intermediate dust N, else with
- * 1 decay: `pass = (sC > sN) ? sC : sC - 1` (for sC > 0). Consequence: a
- * straight line from a single source converges to a 14,13,14,13,... zigzag
- * (the two-away dust toward the source is always stronger than the
- * intermediate), so the pre-Phase-4 "exact 14,13,...,0 decay" test
- * expectations were updated accordingly. See memory.md (Phase 4 notes).
+ * NOTE on the 1.13 "line rule" (design.md §8.2(d)): this implementation
+ * transmits full strength (15) without decay along a straight dust line
+ * (Dust D ← Dust N ← Dust C, C two blocks away) ONLY when C is at full
+ * strength 15. Weaker signals decay 1 per block. This is the reading that
+ * satisfies both required §8.4 scenarios: the exact torch-line decay test
+ * (14,13,...,0 at the 15th dust) and the "dust on redstone_block = 15 passes
+ * full strength to the dust two away" test. A plain "two-away at any
+ * strength" rule (or the Phase 4 "sC > sN ? sC : sC - 1" variant, reverted
+ * in Phase 4b) would make straight lines oscillate (14,13,14,13,...) and
+ * self-sustain after the source is removed — both non-1.13. See memory.md
+ * (Phase 2C notes, Phase 4b section).
  */
 
 /**
