@@ -19,6 +19,7 @@
 - [core] **Phase 1 完了**: スキャフォールド、blocks.ts(全ブロック/アイテム)、chunk/world(注入可能生成器)、mesher、プレイヤー物理、エンジン(renderer/loop/input)、HUD、game.ts、Vitest 56テスト合格、ビルド合格
 - [terrain] **Phase 2A 完了**: src/world/terrain.ts(自作 mulberry32+2D Perlin fBm、バイオーム・鉱石・樹木・水・砂漠・山岳・砂浜)、test/terrain.test.ts(17テスト)。全73テスト合格、ビルド合格
 - [modes] **Phase 2B 完了**: サバイバル/クリエイティブモード、インベントリ(36スロット)、硬度採掘+ドロップ、落下/void/溺水ダメージ・空腹・HP回復、ホットバー/心・空腹バー/F3/インベントリUI、WebAudio効果音、test/inventory.test.ts(19)+test/modes.test.ts(28)。全120テスト合格、ビルド合格
+- [redstone] **Phase 2C 完了**: src/redstone/{types,network,components,tick}.ts(1.13仕様の電力モデル+固定点ダスト伝播+全コンポーネント、20TPS同期)、game.ts 統合(tickRedstone 実装・右クリックインタラクト・facing配置)、test/redstone.test.ts(32: §8.4 全シナリオ)。全152テスト合格、ビルド合格。詳細は「Phase 2C 実装メモ」節を参照
 
 ## Phase 1 実装メモ (Phase 2 チーム必読)
 
@@ -80,6 +81,89 @@ this.world = new World(seed, createTerrainGenerator(seed));
 - ドアは solid=false(簡易化)。ガラスのドロップなし(drop=0)。
 - 水没・落下ダメージ、インベントリ、飛行は未実装(2B)。
 - スクリーンショットの自動検証はサンドボックス制約により未実行(スクリプトは完成済み)。
+
+## Phase 2C 実装メモ (redstone モジュール)
+
+### 新規ファイル(すべて [redstone] 所有)
+```
+src/redstone/types.ts      RedstoneCtx / 定数(MAX_POWER=15, DUST_MAX_ITERATIONS=30,
+                           DUST_MAX_ROUNDS=3, PISTON_PUSH_LIMIT=12, PISTON_ACTION_TICKS=2,
+                           OBSERVER_OUTPUT_TICKS=2, BUTTON_TICKS 10/20) / posKey / FACING_X/Z /
+                           facingFromYaw(yaw) / getRepeaterOut・setRepeaterOut(meta bits4-7)
+src/redstone/network.ts    電力モデル(directPower/weakPower/strongPowerToAbove/isStronglyPowered/
+                           powerFromNeighbor/inputPowerAt) + ダスト固定点伝播
+                           (computeDustTarget / propagateDust / propagateDustToFixedPoint)
+src/redstone/components.ts 全コンポーネント状態機械: tickTorch / tickLamp / tickDelayed(repeater+comparator) /
+                           tickObserver / tickButton / tickPlate / tickPiston(canExtend/extend/retract)
+src/redstone/tick.ts       Redstone クラス: tick(world, ctx) — 宇宙スキャン(プレイヤー3×3チャンク、
+                           id 18..34 の typed-array スキャン≈0.5ms)→ 状態機械 → ピストン移動適用 →
+                           ダスト固定点+受動コンポーネント(上限ラウンド)→ 状態パージ。
+                           pressButton(world,x,y,z) は右クリックから呼ぶ
+test/redstone.test.ts      32テスト(§8.4 全シナリオ: 減衰境界/ラインルール/リピータ遅延・維持・
+                           強度保持・ロック/コンペア compare・subtract/ピストン12推進・13失敗・
+                           bedrock・sticky引き戻し/オブザーバ2tick/トーチ消灯・点灯/ランプ/
+                           圧力プレート/ボタン10・20tick/レバー/決定論)
+```
+
+### game.ts 統合ポイント(Phase 2C が編集した箇所 — 許可範囲内のみ)
+1. **`Game.tickRedstone()`** — スタブを `this.redstone.tick(this.world, ctx)` で実装。
+   ctx = `{ playerX/Y/Z, entityAbove(x,y,z) }`。entityAbove は `Player.boxesIntersect(
+   player.getAABB(), ブロックbox)` で圧力プレートの踏圧を検出。20TPSで毎ティック呼ばれる(既存呼出箇所は不変)。
+2. **`Game.interactWith(hit)`(新規)** — `onRightClick()` 内で placeTarget() 前に呼ぶ。
+   レバー=on切替(setOn)、ボタン=`redstone.pressButton()`(10/20tickカウントダウン)、
+   リピータ=遅延 1→2→3→4→1(setDelay)、コンペア=モード切替(setMode)。ヒットすれば true を返し放置をスキップ。
+3. **`Game.placeTarget()`** — 向きブロック(piston/sticky_piston/observer/repeater/comparator)は
+   `facingFromYaw(player.yaw)` で facing meta(bits0-1)を保存。レッドストーントーチは meta=1(点灯;
+   torch の meta は onOff で facing bit と衝突するため facing は保存しない — 簡易化・下記参照)。
+4. `Game.redstone` フィールド(readonly Redstone)を追加。block-breaking/採掘/エンティティティックは不変。
+
+### RedstoneCtx インターフェース(game.ts → tick.ts)
+```ts
+interface RedstoneCtx {
+  entityAbove(x: number, y: number, z: number): boolean; // AABB重複(プレート: 上1マスの空間)
+  playerX: number; playerY: number; playerZ: number;     // 宇宙スキャン範囲の中心
+}
+```
+
+### 1.13 セマンティクス判断(設計書 §8 準拠 + 決定論的解釈)
+1. **ラインルール(§8.2d)の解釈**: 「2ブロック先のダスト C が **full strength(15)のときのみ**、
+   減衰なしで伝播」。弱い信号は 1ブロック毎 -1 で減衰。根拠: 要求テスト両立必須 —
+   (a) トーチ直線は 14,13,...,0(15個目で0)の完全境界、(b) RB上のダスト(15)が2つ先にフル強度を伝える。
+   「任意強度で2つ先参照」だと直線が 14,13,14,13... にジグザグ化し (a) を壊す。types.ts 冒頭コメントにも明記。
+2. **トーチの消灯条件**: 水平4隣接+下方が給電で消灯。ただし**隣接ダストは消灯要因にしない**
+   (1.13 ルール: 隣接ダストはトーチを消さない。これで基本トーチ+ダスト線回路が成立し、減衰テストと整合)。
+3. **強電力(source化)の範囲**: 強給電された**実ブロック**が 15 source になる(垂直に伝播)。
+   air は source にならない(バグ回避: かつて air が隣接 source で power 化し全回路が過給電した)。
+   水平方向の強 source は redstone_block と点灯中の wall torch のみ(レバー/ボタン/プレートは
+   添付ブロック(下方)にのみ power する — 1.13 準拠の簡易化。添付方向メタは本プロジェクトに無いため)。
+   リピータ/コンペアは facing 方向のブロックにのみ weak+strong 出力(フル強度・減衰なし)。
+4. **ピストン幾何(1.13)**: base=P、(縮小時)ヘッド=P+d を占有、押出カラムは P+2d から。
+   伸展: ヘッド P+d→P+2d、カラム全体 +d 移動、base P→P+d。12要素制限=メインヘッド+押出ブロック
+   (連鎖ピストンは base+head で 2 カウント)。bedrock・非 solid ブロック・向き違いピストンは失敗。
+   縮小: 2tick 後 base 復帰、sticky は「伸展時に記録した前面ブロックが不変かつ solid」のときのみ引き戻し。
+   伸展完了時に前面記録(移動適用後読み込み)。状態 Map は base 移動に伴い再キーイング(移動先キーで保持)。
+5. **リピータ/コンペア timing**: 入力検出 tick t → t+1 で出力 ON(1tick遅延)→ リピータは delay(1-4)tick、
+   コンペアは 1tick 維持 → OFF。出力>0 中はロック(入力無視)。出力=入力強度のキャプチャ(保持)。
+   リピータの出力は meta bits4-7(blocks.ts 未定義域 — Phase 2C 追加、types.ts 参照)。
+   コンペア: compare=max(back, side0, side1)、subtract=max(back-side0, 0)。side0=facing の +90°側。
+6. **ティック順序**(タスク指定): (1)宇宙スキャン(2)状態機械(ピストン/オブザーバ/リピータ/コンペア/
+   ボタン/プレート)(3)ピストン移動適用(4)ダスト固定点(≤30スイープ)+トーチ/ランプ再評価(≤3ラウンド)
+   (5)ランタイム状態パージ。全処理は同期・決定論(排序済み位置順)。タイマ/promise なし。
+
+### 既知の簡易化・制約
+- **アクティブ範囲**: プレイヤーの 3×3 チャンク(±16ブロック)内の redstone ブロック(id 18..34)のみティック。
+  離れたネットワークは停止(Minecraft の active redstone 距離制限と同じ趣旨)。
+- **ディスペンサ/ドロッパー**: 内容物システムが無いため meta bit0 フラグが立っている時のみ source(15)。
+  通常は OFF(タスクの「keep simple」指示どおり)。
+- **トリップワイヤフック**: 未実装(source にもしていない、設計書「簡易可」)。
+- **ハッパー**: blocks.ts に id が存在しない(§8.1 に記載あり)→ 未実装(blocks.ts 編集禁止のため適応: 存在しない id は source にしない)。
+- **メッシャー**: `isPowered()` が facingDelay/facingModeOutput 種を扱わないため、リピータ/コンペアの
+  点灯(litTiles)は描画されない(出力は meta に正しく書かれる)。Phase 3 で mesher 側拡張を推奨。
+- **トーチ自己給電**(トーチが自分のダスト線でループする回路)は 1tick 周期で振動(1.13 と同様の挙動)。
+- **スクリーンショット**: サンドボックス制約で未実行(指示どおり)。視覚検証は Phase 3 の CPU ラスタライザで実施予定。
+
+### テスト結果
+- `npm test`: 152/152 合格(既存120 + 新規32)。`npm run build`: 合格。
 
 ## Phase 2B 実装メモ (modes モジュール)
 

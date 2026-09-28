@@ -30,12 +30,20 @@ import {
   Block,
   Item,
   getBlockDef,
+  getDelay,
+  getMode,
+  isOn,
   isPlaceable,
   isSolidBlock,
   itemBlockId,
   blockName,
   getItemDef,
+  setDelay,
+  setMode,
+  setOn,
 } from './world/blocks';
+import { Redstone } from './redstone/tick';
+import { facingFromYaw, type RedstoneCtx } from './redstone/types';
 import { Inventory } from './player/inventory';
 import {
   ModeManager,
@@ -155,6 +163,7 @@ export class Game {
   readonly inventoryUI: InventoryUI;
   readonly debug: DebugPanel;
   readonly mineBar: MineBar;
+  readonly redstone = new Redstone();
   selectedSlot = 0;
   fps = 60;
   ready = false;
@@ -369,11 +378,20 @@ export class Game {
   }
 
   /**
-   * EXTENSION POINT for Phase 2C (redstone, 20 TPS, synchronous):
-   * call the redstone network/component tick here.
+   * Phase 2C (redstone, 20 TPS, synchronous): drives the redstone network +
+   * component tick. `entityAbove` reports the player AABB overlap for
+   * pressure plates; player position bounds the active-redstone region.
    */
   tickRedstone(): void {
-    // stub — Phase 2C fills this in
+    const p = this.player;
+    const ctx: RedstoneCtx = {
+      playerX: p.x,
+      playerY: p.y,
+      playerZ: p.z,
+      entityAbove: (x, y, z) =>
+        Player.boxesIntersect(p.getAABB(), { minX: x, minY: y, minZ: z, maxX: x + 1, maxY: y + 1, maxZ: z + 1 }),
+    };
+    this.redstone.tick(this.world, ctx);
   }
 
   // -------------------------------------------------------------------------
@@ -511,8 +529,9 @@ export class Game {
   // --- right click: place / eat ----------------------------------------------
 
   /**
-   * Right click: place the selected block item, or eat when the raycast
-   * hits nothing. Phase 2C may extend the interact path (placeTarget).
+   * Right click: interact with a redstone component (Phase 2C) when targeted,
+   * otherwise place the selected block item, or eat when the raycast hits
+   * nothing.
    */
   private onRightClick(): void {
     const hit = this.targetBlock();
@@ -520,6 +539,7 @@ export class Game {
       this.tryEat();
       return;
     }
+    if (this.interactWith(hit)) return;
     const px = hit.x + hit.nx;
     const py = hit.y + hit.ny;
     const pz = hit.z + hit.nz;
@@ -528,7 +548,37 @@ export class Game {
     if (this.world.getBlock(px, py, pz) !== before) this.sfx.play('place');
   }
 
-  /** Right-click place of the currently selected block item. */
+  /**
+   * Right-click component interactions (Phase 2C): lever toggle, button
+   * press, repeater delay cycle (1→2→3→4→1), comparator mode toggle.
+   * Returns true when the target was interacted with (no placement).
+   */
+  private interactWith(hit: RayHit): boolean {
+    const id = this.world.getBlock(hit.x, hit.y, hit.z);
+    const meta = this.world.getMeta(hit.x, hit.y, hit.z);
+    switch (id) {
+      case Block.Lever:
+        this.setBlock(hit.x, hit.y, hit.z, id, setOn(meta, !isOn(meta)));
+        return true;
+      case Block.StoneButton:
+      case Block.WoodButton:
+        this.redstone.pressButton(this.world, hit.x, hit.y, hit.z);
+        return true;
+      case Block.Repeater:
+        this.setBlock(hit.x, hit.y, hit.z, id, setDelay(meta, getDelay(meta) % 4 + 1));
+        return true;
+      case Block.Comparator:
+        this.setBlock(hit.x, hit.y, hit.z, id, setMode(meta, 1 - getMode(meta)));
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Right-click place of the currently selected block item. Facing blocks
+   * (Phase 2C) store a facing meta snapped from the player yaw.
+   */
   private placeTarget(): void {
     const hit = this.targetBlock();
     if (!hit) return;
@@ -545,7 +595,22 @@ export class Game {
       const box = { minX: px, minY: py, minZ: pz, maxX: px + 1, maxY: py + 1, maxZ: pz + 1 };
       if (Player.boxesIntersect(this.player.getAABB(), box)) return;
     }
-    this.setBlock(px, py, pz, bid);
+    // facing meta for facing blocks (piston, sticky_piston, observer,
+    // repeater, comparator); redstone torch stores its on-state (its meta
+    // is onOff — a facing would clobber the on bit; see memory.md 2C notes).
+    let meta = 0;
+    if (
+      bid === Block.Piston ||
+      bid === Block.StickyPiston ||
+      bid === Block.Observer ||
+      bid === Block.Repeater ||
+      bid === Block.Comparator
+    ) {
+      meta = facingFromYaw(this.player.yaw);
+    } else if (bid === Block.RedstoneTorch) {
+      meta = 1; // placed lit
+    }
+    this.setBlock(px, py, pz, bid, meta);
     if (!this.modes.isCreative) this.inventory.removeItem(this.selectedSlot, 1);
     this.refreshHud();
   }
