@@ -19,7 +19,7 @@ export const WALK_SPEED = 4.3; // blocks/s
 export const WATER_SPEED = 2.4;
 export const WATER_GRAVITY = 8;
 export const WATER_FALL_LIMIT = -3;
-export const WATER_JUMP_VELOCITY = 4.5;
+export const WATER_JUMP_VELOCITY = 9; // full-strength kick while holding jump in water (9^2/(2*30) = 1.35 blocks: clears a 1-block bank); set every tick, so holding jump also swims to the surface
 const GROUND_ACCEL = 12; // velocity lerp rate (1/s)
 const AIR_ACCEL = 2.5;
 const WATER_ACCEL = 5;

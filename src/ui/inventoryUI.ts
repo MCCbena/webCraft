@@ -20,6 +20,9 @@ const CSS = `
     padding: 8px;
     background: rgba(15, 15, 15, 0.88);
     border: 2px solid rgba(255, 255, 255, 0.35);
+    /* #hud is pointer-events:none; re-enable so slot clicks register
+       (slots inherit auto from this panel — same pattern as the hotbar). */
+    pointer-events: auto;
   }
   .inv-grid {
     display: grid;

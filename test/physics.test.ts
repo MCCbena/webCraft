@@ -132,3 +132,60 @@ describe('player collision', () => {
     expect(p.x).toBeGreaterThanOrEqual(-128 + 0.3 - 0.001);
   });
 });
+
+/** Flat land (stone y=0..10, surface y=11) with a pool carved at x=0. */
+function poolWorld(): World {
+  return new World(1, (_w, chunk) => {
+    for (let z = 0; z < 16; z++) {
+      for (let x = 0; x < 16; x++) {
+        for (let y = 0; y <= 10; y++) {
+          chunk.setBlock(x, y, z, Block.Stone);
+        }
+      }
+    }
+  });
+}
+
+describe('underwater jump', () => {
+  it('player in 1-block-deep water jumps out over a 1-block bank', () => {
+    const w = poolWorld();
+    // carve a 1-wide, 1-block-deep pool at x=0: floor top y=10 (stone y=9),
+    // water block at y=10; adjacent land (x=1) has its top block at y=10,
+    // i.e. the bank surface is 1 block above the pool floor.
+    for (let z = -8; z <= 8; z++) {
+      w.setBlock(0, 10, z, AIR);
+      w.setBlock(0, 10, z, Block.Water);
+    }
+    const p = new Player(0.5, 10, 0.5); // feet on the pool floor (y=10)
+    const input = { ...emptyInput(), jump: true, right: true };
+    for (let i = 0; i < 60; i++) {
+      stepPlayer(p, input, getBlock(w), DT); // 3 s of holding jump
+    }
+    // ended on/above the bank top (y=11), outside the water
+    expect(p.inWater).toBe(false);
+    expect(p.y).toBeGreaterThanOrEqual(10.99);
+  });
+
+  it('player can swim up out of a 5-block-deep pool', () => {
+    const w = poolWorld();
+    // carve a 5-block-deep pool at x=0: floor top y=6 (stone y=5),
+    // water at y=6..10, surface y=11.
+    for (let z = -8; z <= 8; z++) {
+      for (let y = 6; y <= 10; y++) {
+        w.setBlock(0, y, z, Block.Water);
+      }
+    }
+    const p = new Player(0.5, 6, 0.5); // feet on the pool floor (y=6)
+    let reachedSurface = false;
+    let maxY = 0;
+    for (let i = 0; i < 80; i++) {
+      stepPlayer(p, { ...emptyInput(), jump: true }, getBlock(w), DT); // 4 s of holding jump
+      if (!p.inWater) reachedSurface = true;
+      if (p.y > maxY) maxY = p.y;
+    }
+    // the player broke the surface (y+0.4 body sample above the water column)
+    // within the 4 s window; once above the surface it bobs at the top
+    expect(reachedSurface).toBe(true);
+    expect(maxY).toBeGreaterThanOrEqual(10.6);
+  });
+});

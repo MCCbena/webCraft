@@ -227,6 +227,7 @@ if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust && getStrength(world.getM
 - [fixes] **Phase 4 完了**: レビュー指摘13項目全修正(リピータ持続/落下ダメージ/ピストン上限/extend再検証/ラインルール/トーチ強電力/アイル上限/メッシュ予算/placeTarget(hit)/256×256仕様確定 + DRY・マジックナンバー・デッドコード)。全160テスト合格、ビルド合格、verify 2枚目視確認。詳細は「Phase 4 実装メモ」節を参照
 - [fixes] **Phase 4b 完了**: ラインルールを Phase 2C の exactly-15 に**復帰**(4bの数式 `sC > sN ? sC : sC - 1` はザグザグ均衡+自己持続ラインを引き起こし 1.13 非準拠と確定)。テスト復元(減衰=単調14,13,...,0 / 決定論出力=7 / back入力=12)+ sub-15テスト削除 + 新規「no self-sustain」テスト。design.md §8.2 文言置換。詳細は「Phase 4b 実装メモ」節を参照
 - [polish] **最終polish完了**: (1) design.md §8.4 減衰文言を実装と整合に修正(「14マス目=強度1、15マス目で0（単調減衰）」)。(2) `tickTorch` に 1.13 忠実な「下段ダスト(strength>0)で消灯」を追加(上段からの給電はダストに効かないため安定)。新規テスト2件(点灯ダスト上のトーチ1tickで消灯 / 非点灯ダスト上は点灯維持)。全162テスト合格、ビルド合格
+- [fixes] **ユーザー報告バグ2件修正**: (1) インベントリスロットクリック無効 — `#hud{pointer-events:none}`(index.html)が子要素も食っており、`src/ui/inventoryUI.ts` の `.inventory-panel` ルールに `pointer-events:auto` を追加(スロットはパネルから継承、ホットバーと同パターン)。(2) 水から出られない — `src/player/physics.ts` の `WATER_JUMP_VELOCITY` を 4.5→9 に(9²/60=1.35ブロックで1段の岸を越えられる。ジャンプ維持で毎tick vy=9 更新のため深水の底から表面への上昇も保証。持続上昇キャップ案は岸越え要件(1.0ブロック)と両立しないため未採用)。新規テスト2件(1段岸ジャンプ脱出 / 5段プール水面到達)。全164テスト合格、ビルド合格
 
 ## Phase 1 実装メモ (Phase 2 チーム必読)
 
