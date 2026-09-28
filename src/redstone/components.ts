@@ -21,9 +21,10 @@
  *    id/meta changes (previous state tracked per observer).
  *  - Button: stone 10 / wood 20 ticks, then auto-off.
  *  - Pressure plate: 15 while an entity overlaps the space above.
- *  - Torch: off while powered (4 horizontal neighbors + below, EXCLUDING
- *    dust — 1.13 rule: adjacent dust does not extinguish a torch); recovers
- *    instantly when power is removed.
+ *  - Torch: off while powered (4 horizontal neighbors + below; the block
+ *    below counts strong power OR powered dust — 1.13: dust weakly powers
+ *    the block directly above it; horizontal dust does NOT extinguish);
+ *    recovers instantly when power is removed.
  *  - Lamp: on when any of the 6 neighbors powers it.
  */
 
@@ -37,6 +38,7 @@ import {
   getDelay,
   getMode,
   getOutput,
+  getStrength,
   isOn,
   setOn,
   setOutput,
@@ -83,8 +85,9 @@ export interface ComponentCtx {
 
 /**
  * Torch: turns off while powered by 4 horizontal neighbors + the block
- * below (1.13: redstone dust does NOT count as extinguishing power).
- * Returns true when the meta changed.
+ * below. In 1.13 the block below counts strong power, or redstone dust
+ * with strength > 0 (dust weakly powers the block directly above it).
+ * Horizontal dust does NOT extinguish. Returns true when the meta changed.
  */
 export function tickTorch(c: ComponentCtx, x: number, y: number, z: number): boolean {
   const id = c.world.getBlock(x, y, z);
@@ -97,7 +100,11 @@ export function tickTorch(c: ComponentCtx, x: number, y: number, z: number): boo
     if (powerFromNeighbor(c.world, x, y, z, nx, y, nz, c.observers) > 0) powered = true;
   }
   if (!powered && y > 0) {
-    if (c.world.getBlock(x, y - 1, z) !== Block.RedstoneDust) {
+    const below = c.world.getBlock(x, y - 1, z);
+    if (below === Block.RedstoneDust) {
+      // 1.13: powered dust weakly powers the block directly above it.
+      powered = getStrength(c.world.getMeta(x, y - 1, z)) > 0;
+    } else {
       powered = strongPowerToAbove(c.world, x, y - 1, z, c.observers) > 0;
     }
   }

@@ -503,6 +503,25 @@ describe('torch & lamp (1.13)', () => {
     expect(isOn(h.world.getMeta(0, 10, 0))).toBe(false);
   });
 
+  it('torch on powered dust turns off (1.13: dust weakly powers the block above)', () => {
+    const h = makeHarness();
+    h.place(0, 9, 0, Block.RedstoneDust);
+    h.place(1, 9, 0, Block.RedstoneTorch, 1); // source: powers the dust at 14
+    h.place(0, 10, 0, Block.RedstoneTorch, 1);
+    h.step(1);
+    expect(h.strength(0, 9, 0)).toBeGreaterThan(0);
+    expect(isOn(h.world.getMeta(0, 10, 0))).toBe(false); // off after 1 tick
+  });
+
+  it('torch on unpowered dust stays lit', () => {
+    const h = makeHarness();
+    h.place(0, 9, 0, Block.RedstoneDust);
+    h.place(0, 10, 0, Block.RedstoneTorch, 1);
+    h.step(2);
+    expect(h.strength(0, 9, 0)).toBe(0);
+    expect(isOn(h.world.getMeta(0, 10, 0))).toBe(true);
+  });
+
   it('lamp turns on from adjacent dust and off when the signal is removed', () => {
     const h = makeHarness();
     h.place(0, 10, 0, Block.RedstoneLamp);
