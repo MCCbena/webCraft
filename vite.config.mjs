@@ -2,6 +2,9 @@
 // bundling of .ts config files (spawn EPERM on piped stdio). Keep this file
 // dependency-free ESM JS.
 export default {
+  // Relative base so the built site works on GitHub Pages
+  // (https://<user>.github.io/<repo>/) as well as any sub-path.
+  base: './',
   server: {
     port: 5173,
     host: '127.0.0.1',
