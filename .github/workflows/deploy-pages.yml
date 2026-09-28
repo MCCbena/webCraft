@@ -1,5 +1,9 @@
 name: Deploy WebCraft to GitHub Pages
 
+# GitHub Pages in this environment serves the main branch directly
+# (legacy build; the Pages source cannot be changed via API). So this
+# workflow builds the game and commits the bundle to assets/ on main.
+
 on:
   push:
     branches: [main]
@@ -15,6 +19,8 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Skip pushes created by this workflow itself (deploy commits) to avoid loops.
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'deploy:')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,13 +29,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - name: Publish dist/ to gh-pages branch
+      - name: Commit built bundle to main
         run: |
-          cd dist
-          git init
+          rm -rf assets
+          cp -r dist/assets assets
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "deploy: webcraft build $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git branch -M gh-pages
-          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
+          git add assets
+          if git diff --staged --quiet; then
+            echo "No asset changes; skipping deploy commit."
+          else
+            git commit -m "deploy: update built assets"
+            git push
+          fi

@@ -11,6 +11,21 @@ export default {
   },
   build: {
     target: 'es2022',
+    // The root index.html is a runtime loader (dev vs Pages) whose import is
+    // intentionally opaque to the bundler, so the game entry is declared
+    // explicitly here. Fixed (hashless) output name: the built bundle is
+    // committed to the repo root (assets/) for GitHub Pages, which serves the
+    // main branch directly (legacy Pages build in this environment).
+    rolldownOptions: {
+      input: {
+        game: 'src/main.ts',
+      },
+      output: {
+        entryFileNames: 'assets/game.js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name][extname]',
+      },
+    },
   },
   test: {
     environment: 'node',

@@ -81,6 +81,14 @@
   <body>
     <canvas id="game"></canvas>
     <div id="hud"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module">
+      // GitHub Pages serves this repo's main branch directly (legacy Pages
+      // build): load the prebuilt bundle committed under assets/. Locally,
+      // the Vite dev server serves the TypeScript source. The specifier is
+      // kept non-literal so the bundler leaves the import untouched.
+      const isPages = location.hostname.endsWith('.github.io');
+      const entry = isPages ? ['./assets/', 'game.js'].join('') : ['/src/', 'main.ts'].join('');
+      import(/* @vite-ignore */ entry);
+    </script>
   </body>
 </html>
