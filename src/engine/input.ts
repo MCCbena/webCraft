@@ -13,7 +13,6 @@ export interface InputHandlers {
   onF3?: () => void;
   /** F pressed (mode toggle) */
   onMode?: () => void;
-  onLockChange?: (locked: boolean) => void;
 }
 
 export class Input {
@@ -22,7 +21,6 @@ export class Input {
   private mouseDY = 0;
   private leftQueued = 0;
   private rightQueued = 0;
-  private scroll = 0;
   locked = false;
 
   private readonly canvas: HTMLCanvasElement;
@@ -86,12 +84,6 @@ export class Input {
     return had;
   }
 
-  consumeScroll(): number {
-    const out = this.scroll;
-    this.scroll = 0;
-    return out;
-  }
-
   // --- event handlers ---
 
   private onKeyDown = (e: KeyboardEvent): void => {
@@ -118,7 +110,6 @@ export class Input {
 
   private onLockChange = (): void => {
     this.locked = document.pointerLockElement === this.canvas;
-    this.handlers.onLockChange?.(this.locked);
     if (!this.locked) this.keys.clear();
   };
 
@@ -139,7 +130,9 @@ export class Input {
   };
 
   private onWheel = (e: WheelEvent): void => {
-    if (e.deltaY > 0) this.scroll -= 1;
-    else if (e.deltaY < 0) this.scroll += 1;
+    // Phase 4: the scroll accumulator was dead code (never consumed) and the
+    // onScroll handler was never invoked — the wheel now drives it directly.
+    if (e.deltaY > 0) this.handlers.onScroll?.(-1);
+    else if (e.deltaY < 0) this.handlers.onScroll?.(1);
   };
 }

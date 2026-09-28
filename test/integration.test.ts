@@ -4,6 +4,7 @@ import { Player } from '../src/player/player';
 import { stepPlayer, emptyInput } from '../src/player/physics';
 import { buildChunkMeshData } from '../src/world/mesher';
 import { Block } from '../src/world/blocks';
+import { FallTracker, Vitals, fallDamage } from '../src/player/damage';
 
 /**
  * End-to-end Phase 1 pipeline in plain Node (no DOM/WebGL):
@@ -52,4 +53,52 @@ describe('Phase 1 pipeline (headless)', () => {
     expect(chunks).toBe(49);
     expect(verts).toBeGreaterThan(10000); // a real terrain surface, not empty
   }, 30000);
+});
+
+/**
+ * Fall damage through the REAL game tick order (Phase 4 integration test):
+ * Game.tick() runs stepPlayer, then tickEntity, which MUST evaluate the
+ * landing branch (fallTracker.land) BEFORE fallTracker.update — the old
+ * order reset the peak on the landing tick and fall damage was dead at
+ * runtime. Game itself needs a DOM, so the exact tickEntity sequence is
+ * replicated here against a real world + physics step.
+ */
+describe('fall damage (game tick order)', () => {
+  it('a ~20-block fall applies fall damage (17 for ~20.9 blocks → 3 HP left)', () => {
+    // flat floor, top surface at y=11
+    const w = new World(1, (_w, chunk) => {
+      for (let z = 0; z < 16; z++) {
+        for (let x = 0; x < 16; x++) {
+          for (let y = 0; y <= 10; y++) chunk.setBlock(x, y, z, Block.Stone);
+        }
+      }
+    });
+    const getBlock = (x: number, y: number, z: number): number => w.getBlock(x, y, z);
+    const p = new Player(0.5, 32, 0.5); // ~21-block fall to y=11
+    const tracker = new FallTracker();
+    const vitals = new Vitals(); // 20 HP
+    let wasOnGround = p.onGround;
+    let damageApplied = 0;
+    for (let i = 0; i < 400; i++) {
+      stepPlayer(p, emptyInput(), getBlock, 0.05);
+      // exact Game.tickEntity order (Phase 4 fix): land() BEFORE update()
+      if (p.onGround && !wasOnGround) {
+        const dist = tracker.land(p.y);
+        const dmg = fallDamage(dist);
+        if (dmg > 0) {
+          damageApplied = dmg;
+          vitals.damage(dmg);
+        }
+      }
+      tracker.update(p.y, p.vy, p.onGround);
+      wasOnGround = p.onGround;
+      if (p.onGround && i > 5) break;
+    }
+    expect(p.onGround).toBe(true);
+    expect(p.y).toBeCloseTo(11, 1);
+    // fall ≈ 31.925 (peak after the first air tick) - 11 = 20.9 blocks
+    // → floor(20.9 - 3) = 17 damage → 20 - 17 = 3 HP
+    expect(damageApplied).toBe(17);
+    expect(vitals.hp).toBe(3);
+  });
 });

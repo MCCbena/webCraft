@@ -43,6 +43,7 @@ import {
   setMode,
   setOn,
 } from './world/blocks';
+import { CHUNK_SIZE_X, CHUNK_SIZE_Z } from './world/chunk';
 import { Redstone } from './redstone/tick';
 import { facingFromYaw, type RedstoneCtx } from './redstone/types';
 import { Inventory } from './player/inventory';
@@ -68,6 +69,17 @@ import { InventoryUI } from './ui/inventoryUI';
 import { DebugPanel, facingName } from './ui/debug';
 
 export const REACH = 6.0; // eye reach, design.md §7
+
+/** Mouse-look sensitivity (radians per pixel). */
+const MOUSE_SENSITIVITY = 0.0022;
+/** Pitch clamp (no full upside-down; small epsilon below ±90°). */
+const PITCH_LIMIT = Math.PI / 2 - 0.01;
+/** Frame-dt clamp for stable mining progress after tab switches. */
+const MAX_FRAME_DT = 0.1;
+/** Exponential smoothing factor for the FPS readout (per frame). */
+const FPS_SMOOTHING = 0.05;
+/** Head probe offset above the feet for the drowning check. */
+const HEAD_IN_WATER_OFFSET = 1.5;
 
 export interface RayHit {
   x: number;
@@ -342,7 +354,9 @@ export class Game {
    */
   private tickEntity(jumpHeld: boolean, wasOnGround: boolean): void {
     const p = this.player;
-    this.fallTracker.update(p.y, p.vy, p.onGround);
+    // Phase 4 fix: evaluate the landing branch BEFORE fallTracker.update() —
+    // update() with onGround=true resets the peak, so calling it first made
+    // land() return 0 and fall damage was dead at runtime.
     if (p.onGround && !wasOnGround) {
       const dist = this.fallTracker.land(p.y);
       if (dist > 0 && !this.modes.isCreative) {
@@ -353,7 +367,8 @@ export class Game {
         }
       }
     }
-    const headInWater = this.world.getBlock(Math.floor(p.x), Math.floor(p.y + 1.5), Math.floor(p.z)) === WATER;
+    this.fallTracker.update(p.y, p.vy, p.onGround);
+    const headInWater = this.world.getBlock(Math.floor(p.x), Math.floor(p.y + HEAD_IN_WATER_OFFSET), Math.floor(p.z)) === WATER;
     const justJumped = wasOnGround && jumpHeld && !p.inWater;
     tickVitals(this.vitals, {
       headInWater,
@@ -406,11 +421,9 @@ export class Game {
   frame(): void {
     const { dx, dy } = this.input.consumeMouse();
     if (this.input.locked) {
-      const sens = 0.0022;
-      this.player.yaw -= dx * sens;
-      this.player.pitch -= dy * sens;
-      const lim = Math.PI / 2 - 0.01;
-      this.player.pitch = Math.max(-lim, Math.min(lim, this.player.pitch));
+      this.player.yaw -= dx * MOUSE_SENSITIVITY;
+      this.player.pitch -= dy * MOUSE_SENSITIVITY;
+      this.player.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.player.pitch));
     }
     if (this.input.consumeLeft()) this.onLeftClick();
     if (this.input.consumeRight()) this.onRightClick();
@@ -418,9 +431,9 @@ export class Game {
     const now = performance.now();
     const dtf = (now - this.lastFrame) / 1000;
     this.lastFrame = now;
-    if (dtf > 0) this.fpsSmooth = this.fpsSmooth * 0.95 + (1 / dtf) * 0.05;
+    if (dtf > 0) this.fpsSmooth = this.fpsSmooth * (1 - FPS_SMOOTHING) + (1 / dtf) * FPS_SMOOTHING;
     this.fps = this.fpsSmooth;
-    const dt = Math.min(Math.max(dtf, 0), 0.1); // clamp for stable mining progress
+    const dt = Math.min(Math.max(dtf, 0), MAX_FRAME_DT); // clamp for stable mining progress
 
     this.tickMining(dt);
     this.refreshHud();
@@ -548,7 +561,8 @@ export class Game {
     const py = hit.y + hit.ny;
     const pz = hit.z + hit.nz;
     const before = this.world.getBlock(px, py, pz);
-    this.placeTarget();
+    // Phase 4: pass the raycast hit through — no second targetBlock() call.
+    this.placeTarget(hit);
     if (this.world.getBlock(px, py, pz) !== before) this.sfx.play('place');
   }
 
@@ -580,12 +594,11 @@ export class Game {
   }
 
   /**
-   * Right-click place of the currently selected block item. Facing blocks
-   * (Phase 2C) store a facing meta snapped from the player yaw.
+   * Right-click place of the currently selected block item (the raycast hit
+   * is passed in from onRightClick — Phase 4: no duplicate raycast). Facing
+   * blocks (Phase 2C) store a facing meta snapped from the player yaw.
    */
-  private placeTarget(): void {
-    const hit = this.targetBlock();
-    if (!hit) return;
+  private placeTarget(hit: RayHit): void {
     const px = hit.x + hit.nx;
     const py = hit.y + hit.ny;
     const pz = hit.z + hit.nz;
@@ -692,12 +705,7 @@ export class Game {
   /** Set a block and mark this chunk (plus neighbors on borders) for remesh. */
   setBlock(x: number, y: number, z: number, id: number, meta = 0): void {
     this.world.setBlock(x, y, z, id, meta);
-    const cx = Math.floor(x / 16);
-    const cz = Math.floor(z / 16);
-    const lx = x - cx * 16;
-    const lz = z - cz * 16;
-    const onBorder = lx === 0 || lx === 15 || lz === 0 || lz === 15;
-    this.world.markDirty(cx, cz, onBorder);
+    this.world.markDirtyAround(x, y, z); // shared helper (Phase 4 DRY)
   }
 
   // --- HUD ----------------------------------------------------------------------
@@ -711,8 +719,8 @@ export class Game {
       y: this.player.y,
       z: this.player.z,
       facing: facingName(this.player.yaw),
-      chunkX: Math.floor(this.player.x / 16),
-      chunkZ: Math.floor(this.player.z / 16),
+      chunkX: Math.floor(this.player.x / CHUNK_SIZE_X),
+      chunkZ: Math.floor(this.player.z / CHUNK_SIZE_Z),
       fps: this.fps,
       mode: this.mode,
       seed: this.world.seed,
@@ -729,7 +737,7 @@ export class Game {
       `mode: ${this.mode}   selected: ${sel}`,
     ];
     if (this.f3) {
-      lines.push(`chunk: ${Math.floor(p.x / 16)},${Math.floor(p.z / 16)}   fps: ${this.fps.toFixed(0)}`);
+      lines.push(`chunk: ${Math.floor(p.x / CHUNK_SIZE_X)},${Math.floor(p.z / CHUNK_SIZE_Z)}   fps: ${this.fps.toFixed(0)}`);
       lines.push(`meshed chunks: ${this.renderer.meshedChunkCount}   seed: ${this.world.seed}`);
     }
     return lines.join('\n');

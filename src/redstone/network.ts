@@ -72,9 +72,11 @@ export function directPower(id: number, meta: number, x: number, y: number, z: n
 
 /**
  * True when the block is strongly powered: the block below is a (transitive)
- * power source, a horizontal neighbor is a side-attachment source (redstone
- * block, lit wall torch), or a directional component outputs toward it.
- * 1.13 nuance: levers/buttons/plates power their attachment (the block
+ * power source, a horizontal neighbor is a redstone block, or a directional
+ * component (repeater/comparator) outputs toward it.
+ * 1.13 nuance: a lit torch strong-powers ONLY the block below it, never its
+ * 4 horizontal neighbors — so torches are not horizontal strong sources
+ * (Phase 4 fix). Levers/buttons/plates power their attachment (the block
  * below), NOT horizontal neighbors — so they are excluded here. Dust does
  * not strongly power horizontally (its power is weak).
  */
@@ -92,7 +94,6 @@ export function isStronglyPowered(world: World, x: number, y: number, z: number,
       continue;
     }
     if (id === Block.RedstoneBlock) return true;
-    if (id === Block.RedstoneTorch && isOn(world.getMeta(nx, y, nz))) return true;
   }
   return false;
 }
@@ -160,12 +161,15 @@ export function computeDustTarget(world: World, x: number, y: number, z: number,
     if (idN === Block.RedstoneDust) {
       const sN = getStrength(world.getMeta(nx, y, nz));
       if (sN > 0) m = Math.max(m, sN - 1);
-      // LINE RULE (design.md §8.2(d)): dust C two blocks away in a straight
-      // line (dust N in between) transmits full strength without decay.
+      // LINE RULE (design.md §8.2(d), 1.13): dust C two blocks away in a
+      // straight line (dust N in between) passes WITHOUT decay when it is
+      // stronger than the intermediate dust N, else with 1 decay:
+      // pass = (sC > sN) ? sC : sC - 1 (for sC > 0).
       const cx2 = x + 2 * FACING_X[f];
       const cz2 = z + 2 * FACING_Z[f];
-      if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust && getStrength(world.getMeta(cx2, y, cz2)) === MAX_POWER) {
-        m = MAX_POWER;
+      if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust) {
+        const sC = getStrength(world.getMeta(cx2, y, cz2));
+        if (sC > 0) m = Math.max(m, sC > sN ? sC : sC - 1);
       }
     } else if (idN === Block.Repeater || idN === Block.Comparator) {
       // Directional output: full strength, no decay, only toward the facing.

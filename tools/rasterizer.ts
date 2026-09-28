@@ -207,6 +207,9 @@ function swSpeckle(c: SwCanvas, tile: number, color: RGB, count: number, size = 
  * Build the procedural atlas in pure TS (mirror of paintAtlas in
  * src/engine/atlas.ts — same tiles, same base colors; strokeRect details are
  * approximated by 1px outlines).
+ *
+ * DRIFT WARNING: this is a second copy of the tile layout/colors. When you
+ * change a tile in src/engine/atlas.ts, update the matching sw* call here.
  */
 export function buildSoftwareAtlas(): SoftwareAtlas {
   const c = new SwCanvas(256);

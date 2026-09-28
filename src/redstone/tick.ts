@@ -23,7 +23,7 @@
  */
 
 import { AIR, Block, setOn } from '../world/blocks';
-import { CHUNK_VOLUME } from '../world/chunk';
+import { CHUNK_SIZE_X, CHUNK_SIZE_Z, CHUNK_VOLUME } from '../world/chunk';
 import type { World } from '../world/world';
 import {
   BUTTON_TICKS_STONE,
@@ -127,7 +127,7 @@ export class Redstone {
     if (moves.length > 0) {
       for (const m of moves) {
         world.setBlock(m.x, m.y, m.z, m.id, m.meta);
-        this.markBorderDirty(world, m.x, m.z);
+        world.markDirtyAround(m.x, m.y, m.z); // shared helper (Phase 4 DRY)
         this.patchUniverse(universe, m.x, m.y, m.z, m.id);
         keys.add(posKey(m.x, m.y, m.z));
       }
@@ -167,29 +167,21 @@ export class Redstone {
   /** Write a block and mark this chunk (plus border neighbors) for remesh. */
   private write(world: World, x: number, y: number, z: number, id: number, meta: number): void {
     world.setBlock(x, y, z, id, meta);
-    this.markBorderDirty(world, x, z);
-  }
-
-  private markBorderDirty(world: World, x: number, z: number): void {
-    const cx = Math.floor(x / 16);
-    const cz = Math.floor(z / 16);
-    const lx = x - cx * 16;
-    const lz = z - cz * 16;
-    if (lx === 0 || lx === 15 || lz === 0 || lz === 15) world.markDirty(cx, cz, true);
+    world.markDirtyAround(x, y, z); // shared helper (Phase 4 DRY)
   }
 
   /** Redstone blocks (id 18..34) in the player's 3×3 chunk region. */
   private scanUniverse(world: World, ctx: RedstoneCtx): Map<number, UniverseBlock> {
     const map = new Map<number, UniverseBlock>();
-    const cx0 = Math.floor(ctx.playerX / 16);
-    const cz0 = Math.floor(ctx.playerZ / 16);
+    const cx0 = Math.floor(ctx.playerX / CHUNK_SIZE_X);
+    const cz0 = Math.floor(ctx.playerZ / CHUNK_SIZE_Z);
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
         const chunk = world.getChunk(cx0 + dx, cz0 + dz);
         if (!chunk) continue;
         const ids = chunk.ids;
-        const bx = (cx0 + dx) * 16;
-        const bz = (cz0 + dz) * 16;
+        const bx = (cx0 + dx) * CHUNK_SIZE_X;
+        const bz = (cz0 + dz) * CHUNK_SIZE_Z;
         for (let i = 0; i < CHUNK_VOLUME; i++) {
           const id = ids[i];
           if (!isRedstoneBlock(id)) continue;

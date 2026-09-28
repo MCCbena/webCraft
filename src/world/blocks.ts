@@ -13,6 +13,7 @@
  *   bits 2-3  delay-1 → 1..4 tick (kind: facingDelay — repeater)
  *   bit  2    mode 0=compare 1=subtract (kind: facingModeOutput — comparator)
  *   bits 3-6  output strength 0-15      (comparator, written by redstone tick)
+ *   bits 4-7  output strength 0-15      (repeater, written by redstone tick)
  *
  * Redstone 1.13 power conventions used by the Phase 2C module:
  *   - Weak power: horizontal 4 neighbors (dust on/beside, components behind)
@@ -67,8 +68,6 @@ export const Block = {
   Torch: 35,
   OakDoor: 36,
 } as const;
-
-export type BlockId = (typeof Block)[keyof typeof Block];
 
 // ---------------------------------------------------------------------------
 // Meta specs & helpers
@@ -135,11 +134,17 @@ export function getOutput(meta: number): number {
 export function setOutput(meta: number, strength: number): number {
   return (meta & ~0x78) | ((strength & 0x0f) << 3);
 }
-export function isOpen(meta: number): boolean {
-  return isSideOn(meta);
+/**
+ * bits 4-7 — repeater output strength (written by the redstone tick).
+ * Single source of truth for the repeater-output meta mask (Phase 4 DRY:
+ * previously duplicated in redstone/types.ts, world/mesher.ts and
+ * tools/verify-render.ts).
+ */
+export function getRepeaterOut(meta: number): number {
+  return (meta & 0xf0) >>> 4;
 }
-export function setOpen(meta: number, open: boolean): number {
-  return setSideOn(meta, open);
+export function setRepeaterOut(meta: number, strength: number): number {
+  return (meta & 0x0f) | ((strength & 0x0f) << 4);
 }
 
 // ---------------------------------------------------------------------------

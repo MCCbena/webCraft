@@ -38,10 +38,6 @@ export class GameLoop {
     cancelAnimationFrame(this.raf);
   }
 
-  get isRunning(): boolean {
-    return this.running;
-  }
-
   private frameCb = (now: number): void => {
     if (!this.running) return;
     let dt = (now - this.last) / 1000;

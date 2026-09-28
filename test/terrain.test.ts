@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { World } from '../src/world/world';
-import { createTerrainGenerator, sampleColumn, TERRAIN_SEA_LEVEL, mulberry32 } from '../src/world/terrain';
+import { createTerrainGenerator, columnProfile, TERRAIN_SEA_LEVEL, mulberry32 } from '../src/world/terrain';
 import { AIR, WATER, Block } from '../src/world/blocks';
 import { chunkIndex } from '../src/world/chunk';
 
@@ -155,7 +155,7 @@ describe('terrain: surface sanity (4x4 chunk region)', () => {
     let ocean = 0;
     let violations = 0;
     for (const c of cols) {
-      const expected = sampleColumn(SEED_A, c.wx, c.wz);
+      const expected = columnProfile(SEED_A, c.wx, c.wz);
       if (!allowed.has(expected.surface)) violations++;
 
       const chunk = w.getChunk(c.cx, c.cz)!;
@@ -181,7 +181,7 @@ describe('terrain: surface sanity (4x4 chunk region)', () => {
   it('ocean columns: sandy seafloor, water from surface+1 up to y=60, air above', () => {
     let ocean = 0;
     for (const c of cols) {
-      const p = sampleColumn(SEED_A, c.wx, c.wz);
+      const p = columnProfile(SEED_A, c.wx, c.wz);
       if (!p.underwater) continue;
       ocean++;
       const chunk = w.getChunk(c.cx, c.cz)!;
@@ -197,7 +197,7 @@ describe('terrain: surface sanity (4x4 chunk region)', () => {
   it('beaches: columns 1-3 blocks below sea level are sandy', () => {
     let beaches = 0;
     for (const c of cols) {
-      const p = sampleColumn(SEED_A, c.wx, c.wz);
+      const p = columnProfile(SEED_A, c.wx, c.wz);
       const depth = TERRAIN_SEA_LEVEL - p.height;
       if (depth >= 1 && depth <= 3) {
         beaches++;
@@ -243,7 +243,7 @@ describe('terrain: surface sanity (4x4 chunk region)', () => {
     let min = 256;
     let max = 0;
     for (const c of cols) {
-      const h = sampleColumn(SEED_A, c.wx, c.wz).height;
+      const h = columnProfile(SEED_A, c.wx, c.wz).height;
       min = Math.min(min, h);
       max = Math.max(max, h);
     }
@@ -257,7 +257,7 @@ describe('terrain: ores (4x4 chunk region)', () => {
   const w = regionWorld(SEED_A);
   const cols = regionColumns();
 
-  it('redstone only at y<=16; coal and iron both exist', () => {
+  it('redstone only at y<16 (y<=15, 1.13); coal and iron both exist', () => {
     let coal = 0;
     let iron = 0;
     let redstone = 0;
@@ -269,7 +269,7 @@ describe('terrain: ores (4x4 chunk region)', () => {
         else if (id === Block.IronOre) iron++;
         else if (id === Block.RedstoneOre) {
           redstone++;
-          expect(y).toBeLessThanOrEqual(16);
+          expect(y).toBeLessThan(16);
         }
       }
     }
@@ -341,7 +341,7 @@ describe('terrain: trees', () => {
     let checked = 0;
     let treeBlocks = 0;
     for (const c of regionColumns()) {
-      const p = sampleColumn(SEED_A, c.wx, c.wz);
+      const p = columnProfile(SEED_A, c.wx, c.wz);
       if (p.biome !== 'desert' && !p.underwater) continue;
       checked++;
       const chunk = w.getChunk(c.cx, c.cz)!;

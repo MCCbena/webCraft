@@ -62,10 +62,6 @@ export class DebugPanel {
     this.el.style.display = v ? 'block' : 'none';
   }
 
-  get isVisible(): boolean {
-    return this.visible;
-  }
-
   update(info: DebugInfo): void {
     if (!this.visible) return;
     this.el.textContent = [

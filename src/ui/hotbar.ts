@@ -138,10 +138,6 @@ export class Hotbar {
     this.container.style.pointerEvents = on ? 'auto' : 'none';
   }
 
-  get isInteractive(): boolean {
-    return this.interactive;
-  }
-
   /** Refresh icons + counts (no-op when nothing changed). */
   update(inv: Inventory, selected: number): void {
     let sig = String(selected);

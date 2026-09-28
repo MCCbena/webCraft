@@ -64,7 +64,7 @@ const IRON_MIN_Y = 8;
 const IRON_MAX_Y = 64;
 const IRON_PROB = 0.004;
 const IRON_SIZE = 6; // blob size 3..8
-const REDSTONE_MAX_Y = 16;
+const REDSTONE_MAX_Y = 15; // redstone ore at y < 16 (1.13)
 const REDSTONE_PROB = 0.003;
 const REDSTONE_SIZE = 6; // blob size 2..7
 
@@ -232,8 +232,6 @@ function noiseSetFor(seed: number): NoiseSet {
 
 export type Biome = 'plains' | 'forest' | 'desert' | 'mountain';
 
-/** Public biome name for a biome code. */
-const BIOME_NAMES: Biome[] = ['plains', 'forest', 'desert', 'mountain'];
 const BIOME_CODE: Record<Biome, number> = { plains: BIOME_PLAINS, forest: BIOME_FOREST, desert: BIOME_DESERT, mountain: BIOME_MOUNTAIN };
 
 interface ColumnProfile {
@@ -250,7 +248,8 @@ interface ColumnProfile {
 
 /**
  * Deterministic terrain profile for one world column. Pure function of
- * (seed, wx, wz) — used both by the chunk generator and by `sampleColumn`.
+ * (seed, wx, wz) — used by the chunk generator and by tests/tooling
+ * (Phase 4: the `sampleColumn` alias was removed — this is the sampler).
  */
 export function columnProfile(seed: number, wx: number, wz: number): ColumnProfile {
   const noise = noiseSetFor(seed);
@@ -299,14 +298,6 @@ export function columnProfile(seed: number, wx: number, wz: number): ColumnProfi
   }
 
   return { height, biome, surface, sub, underwater };
-}
-
-/**
- * Deterministic sample of one column (pure, no chunks). Used by tests to
- * assert surface sanity per biome.
- */
-export function sampleColumn(seed: number, wx: number, wz: number): ColumnProfile {
-  return columnProfile(seed, wx, wz);
 }
 
 // ---------------------------------------------------------------------------
@@ -512,9 +503,4 @@ export function createTerrainGenerator(seed: number): ChunkGenerator {
       }
     }
   };
-}
-
-/** Biome name lookup helper (used by tests/reporting). */
-export function biomeName(code: number): Biome {
-  return BIOME_NAMES[code] ?? BIOME_NAMES[BIOME_PLAINS];
 }

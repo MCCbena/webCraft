@@ -1,5 +1,95 @@
 # WebCraft — サブエージェント向け作業メモ
 
+## Phase 4 実装メモ (review defect fixes)
+
+### レビュー指摘の修正(全13項目対応)
+**BLOCKERS**
+1. **リピータ/コンペアの持続入力パルス** `src/redstone/components.ts` `tickDelayed`:
+   残(delay window)が 0 になった瞬間に**入力を再サンプル**。>0 なら出力維持+強度
+   再キャプチャ+window リセット、0 のみで消灯(state 削除)。持続入力→持続出力、
+   入力除去→最小点灯時間(delay tick)後に低下。テスト更新:
+   「constant input → continuous output (no OFF tick in 20 ticks)」「input removed →
+   persists for minimum-on time then falls」(delay 1 と 4)。`tools/verify-render.ts`
+   は delay 1 に変更(workaround コメント削除)— ランプ常点灯を実機検証。
+2. **落下ダメージ無効化** `src/game.ts` `tickEntity`: `fallTracker.land()` を
+   `fallTracker.update()` **より前に**評価(従来は onGround tick で peak リセットされ
+   land() が常に 0)。統合テスト追加 `test/integration.test.ts`: 実 tick 順序で
+   ~20.9ブロック落下 → 17ダメージ → HP 3。
+3. **ピストン押し出し上限 off-by-one** `src/redstone/components.ts` `canExtend`:
+   count は 0 開始(メインヘッドはカウントしない、連鎖ピストンは base+head=2)。
+   12ブロック=成功 / 13ブロック=失敗 をテストで確認。
+
+**MINOR**
+4. `extend()`: 押出列を再検証(2tickカウントダウン中の世界変化対応)。
+   無効化時は move 列挙せず中止(state 削除、ピストンはその場にとどまる)。
+5. **ラインルール** `src/redstone/network.ts` `computeDustTarget`:
+   `pass = (sC > sN) ? sC : sC - 1`(sC > 0)。⚠ **判定・影響**: タスクの「既存§8.4
+   テストは緑のまま」との条件は**両立不可能**(直線は必ず 14,13,14,13,... ザグザグ
+   に収束 — ソース側の 2先は常に中間より強い)。明示された数式を優先し実装、
+   影響を受けたテストの期待値を更新:
+   - 減衰テスト → ザグザグ均衡 (14,13,14,13,...; 15個目=14)
+   - 決定論テスト → リピータ入力(dust #8)=13 / 出力 13 (旧: 7)
+   - トーチ列 fixture の back 入力 = 14 (旧: 12) → コンペア/リピータの期待値更新
+   - 新規: sub-15 ラインパステスト (3ダスト列 → 14,13,14)
+   - **副次効果**: ラインは自己持続(一度点灯すると消灯しない — トーチ除去でも
+     ダスト列は 14,13,14 で維持)。コンペア「入力除去」テストは back ダスト自体を
+     除去して入力を断つ。
+6. **点灯トーチの水平強給電** `network.ts` `isStronglyPowered`: 水平 strong source
+   を redstone_block(+リピータ/コンペア出力)に限定。トーチは下方ブロックのみ。
+7. **レドストーンアイル上限** `terrain.ts`: `REDSTONE_MAX_Y = 15`(y<16)。
+   テスト `toBeLessThan(16)` に更新。
+8. **メッシング予算** `src/engine/renderer.ts`: `MESH_BUDGET_PER_FRAME = 2`、
+   キュー(nearest-first、未処理は保持)。初回 49チャンクは数フレームで分散。
+9. `game.ts` `placeTarget(hit: RayHit)`: onRightClick のレイキャスト結果を渡し、
+   二重 targetBlock() 削除。
+10. **4096×4096 旧コメント修正**: `world.ts`(ヘッダ+定数コメント)、
+    `physics.ts`(ヘッダ)、`docs/design.md` §1(256×256ブロック・高さ256)と
+    §5(座標 -128..127)。承認仕様 = 16×16チャンク = 256×256ブロック。
+
+**DRY / マジックナンバー / デッドコード**
+- リピータ出力マスク `(meta & 0xf0) >>> 4` を `blocks.ts` に集約
+  (`getRepeaterOut`/`setRepeaterOut`)。types.ts は re-export、mesher/verify-render
+  は import。
+- Phase 1 プレースホルダ生成器を `world.ts` から**削除**(mulberry32/hash2/
+  valueNoise/fbmNoise/SEA_LEVEL/placeholderHeight/plantTree/generateSimpleTerrain)。
+  既定生成器 = `createTerrainGenerator(seed)`(terrain.ts から import、型のみ
+  逆参照でランタイム循環なし)。world.test の「placeholder terrain」テストは
+  地形生成器のまま全合格(名称のみ更新)。
+- チャンク境界 dirty マーキングを `world.markDirtyAround(x,y,z)` に集約
+  (game.setBlock と redstone/tick の重複ロジック削除)。
+- `mesher.ts` の `ATLAS_TILES_X/Y` 再定義を削除 → `engine/atlas.ts`
+  `ATLAS_TILES_PER_ROW` を import(純TS・three.js なし)。
+- デッドコード削除: `Input.consumeScroll`+scrollフィールド(**wheel が onScroll
+  を呼んでいなかった潜在バグも修復 — 直接呼出に**)、`Input.onLockChange` オプション、
+  `blocks.ts` `isOpen`/`setOpen`/`BlockId` 型、`terrain.ts` `biomeName`+`BIOME_NAMES`、
+  `GameLoop.isRunning`、`Hotbar.isInteractive`、`DebugPanel.isVisible`、
+  verify-render の never-true `file://${process.argv[1]}` 条件。
+  `ModeManager.setFly` は modes.test が使用するため**保持**。
+- マジックナンバー: `CHUNK_SIZE_X/Z`(chunk.ts)を game/tick/renderer/world に、
+  `WORLD_MAX_Y` を physics.ts に使用。海面は `TERRAIN_SEA_LEVEL` の単一定数に
+  統一(world.ts 側 SEA_LEVEL はプレースホルダ削除で消滅)。game.ts 調整定数に
+  命名(MOUSE_SENSITIVITY 0.0022 / PITCH_LIMIT / MAX_FRAME_DT 0.1 /
+  FPS_SMOOTHING 0.05 / HEAD_IN_WATER_OFFSET 1.5)。
+- `terrain.ts` `sampleColumn` エイリアスを削除(呼び出し元 verify-render/
+  terrain.test は `columnProfile` に更新)。
+- `tools/rasterizer.ts` `buildSoftwareAtlas` に atlas.ts への drift-warning
+  クロスリファレンス追加。
+
+### テスト結果
+- `npm test`: **160/160 合格**(既存158 + 新規2: sub-15ラインルール /
+  落下ダメージ統合。一部は書き換え)。
+- `npm run build`: 合格(tsc --noEmit + vite build)。
+- `npm run verify`: 両スクリーンショット再生成し目視確認(地形=草原+砂+雪山、
+  レッドストーン=ダスト列(ザグザグ 14/13)+点灯リピータ+**delay 1 でランプ常点灯**)。
+- コンソール: dust=[14,13,14,13,...]、repeater output=13、lamp lit=true。
+
+### 判断(要報告)
+- **ラインルール数式 vs 既存テスト緑の両立不能**(item 5): 上段参照。
+  ユーザー確認ができない環境だったため、タスクの明示数式を優先した。
+  §8.4「15個目=0」の設計書文言はザグザグ均衡と不一致(要上級レビュー再確認)。
+
+---
+
 ## Phase 3 実装メモ (integration + render verification)
 
 ### 変更点(全ファイル)
@@ -78,6 +168,7 @@
 - [modes] **Phase 2B 完了**: サバイバル/クリエイティブモード、インベントリ(36スロット)、硬度採掘+ドロップ、落下/void/溺水ダメージ・空腹・HP回復、ホットバー/心・空腹バー/F3/インベントリUI、WebAudio効果音、test/inventory.test.ts(19)+test/modes.test.ts(28)。全120テスト合格、ビルド合格
 - [redstone] **Phase 2C 完了**: src/redstone/{types,network,components,tick}.ts(1.13仕様の電力モデル+固定点ダスト伝播+全コンポーネント、20TPS同期)、game.ts 統合(tickRedstone 実装・右クリックインタラクト・facing配置)、test/redstone.test.ts(32: §8.4 全シナリオ)。全152テスト合格、ビルド合格。詳細は「Phase 2C 実装メモ」節を参照
 - [integration] **Phase 3 完了**: 地形配線(game.ts 1行+import)、mesher 点灯タイル修正(repeater/comparator+ComparatorOn タイル48追加)、DRYアトラス抽出(src/engine/atlas.ts が renderer/icons 共用)、CPUラスタライザ(tools/、`npm run verify`、terrain+redstone の2枚スクリーンショット)、スモークテスト(test/verify.test.ts)。全158テスト合格、ビルド合格。詳細は「Phase 3 実装メモ」節を参照
+- [fixes] **Phase 4 完了**: レビュー指摘13項目全修正(リピータ持続/落下ダメージ/ピストン上限/extend再検証/ラインルール/トーチ強電力/アイル上限/メッシュ予算/placeTarget(hit)/256×256仕様確定 + DRY・マジックナンバー・デッドコード)。全160テスト合格、ビルド合格、verify 2枚目視確認。詳細は「Phase 4 実装メモ」節を参照
 
 ## Phase 1 実装メモ (Phase 2 チーム必読)
 

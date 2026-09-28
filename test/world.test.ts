@@ -16,11 +16,9 @@ function flatWorld(floorY = 10, seed = 1): World {
 }
 
 describe('World structure', () => {
-  // NOTE: design.md §5 says "16×16 chunk world (4096×4096 blocks)" — with
-  // 16-block chunks (fixed by §5) a 16×16 chunk grid is 256×256 blocks.
-  // 4096×4096 blocks would need 65536 chunks (~8 GB of block data), which is
-  // not feasible in a browser. Phase 1 implements the 16×16 = 256-chunk grid;
-  // the 4096×4096 figure is a documented spec deviation (see memory.md).
+  // NOTE: the approved spec (design.md §1/§5, corrected in Phase 4) is a
+  // 16×16 chunk world = 256×256 blocks (16-block chunks × 16×16 grid),
+  // height 256. The old 4096×4096 figure in the design doc was a spec error.
   it('is a 16x16 chunk grid (256 chunks) of 256x256x256', () => {
     const w = flatWorld();
     expect(WORLD_SIZE_X).toBe(256);
@@ -129,7 +127,7 @@ describe('deterministic generation', () => {
     expect(diffs).toBeGreaterThan(0);
   });
 
-  it('placeholder terrain has grass/dirt/stone/bedrock and water below sea level', () => {
+  it('default terrain (Phase 2A generator) has grass/dirt/stone/bedrock and water below sea level', () => {
     const w = new World(1337);
     // scan a few columns: expect bedrock at bottom, stone mid, solid top
     let foundBedrock = false;

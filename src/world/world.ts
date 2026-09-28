@@ -1,27 +1,30 @@
 /**
  * WebCraft — World (Phase 1, [core]).
  *
- * 16x16 chunk grid = 256 chunks, world 4096x4096 blocks, height 256.
- * World block coordinates are CENTERED: x,z in [-2048, 2047], y in [0, 255].
+ * 16x16 chunk grid = 256 chunks, world 256x256 blocks, height 256
+ * (approved spec — docs/design.md §1/§5).
+ * World block coordinates are CENTERED: x,z in [-128, 127], y in [0, 255].
  * Chunk coords cx,cz in [-8, 7]; block x = cx*16 + localX.
  *
- * The terrain generator is INJECTABLE (Phase 2A replaces
- * generateSimpleTerrain with src/world/terrain.ts):
+ * The terrain generator is INJECTABLE; the default is the Phase 2A terrain
+ * generator (src/world/terrain.ts):
  *
- *     const world = new World(seed, myChunkGenerator);
+ *     const world = new World(seed);                  // terrain generator
+ *     const world = new World(seed, myChunkGenerator); // custom generator
  *
  * Pure TS — no DOM/three.js — fully unit-testable.
  */
 
-import { AIR, WATER, Block } from './blocks';
-import { Chunk } from './chunk';
+import { AIR, WATER } from './blocks';
+import { Chunk, CHUNK_SIZE_X, CHUNK_SIZE_Z } from './chunk';
+import { createTerrainGenerator } from './terrain';
 
 export const WORLD_CHUNKS_X = 16;
 export const WORLD_CHUNKS_Z = 16;
-export const WORLD_SIZE_X = WORLD_CHUNKS_X * 16; // 4096
-export const WORLD_SIZE_Z = WORLD_CHUNKS_Z * 16; // 4096
-export const WORLD_MIN_X = -WORLD_SIZE_X / 2; // -2048
-export const WORLD_MIN_Z = -WORLD_SIZE_Z / 2; // -2048
+export const WORLD_SIZE_X = WORLD_CHUNKS_X * CHUNK_SIZE_X; // 256
+export const WORLD_SIZE_Z = WORLD_CHUNKS_Z * CHUNK_SIZE_Z; // 256
+export const WORLD_MIN_X = -WORLD_SIZE_X / 2; // -128
+export const WORLD_MIN_Z = -WORLD_SIZE_Z / 2; // -128
 export const WORLD_MAX_Y = 256;
 
 export const DEFAULT_SEED = 1337;
@@ -42,7 +45,7 @@ export class World {
   /** injectable terrain generator (Phase 2A extension point) */
   generator: ChunkGenerator;
 
-  constructor(seed: number = DEFAULT_SEED, generator: ChunkGenerator = generateSimpleTerrain) {
+  constructor(seed: number = DEFAULT_SEED, generator: ChunkGenerator = createTerrainGenerator(seed)) {
     this.seed = seed;
     this.generator = generator;
   }
@@ -79,26 +82,30 @@ export class World {
 
   getBlock(x: number, y: number, z: number): number {
     if (!this.inWorld(x, y, z)) return AIR;
-    const c = this.ensureChunk(Math.floor(x / 16), Math.floor(z / 16));
+    const cx = Math.floor(x / CHUNK_SIZE_X);
+    const cz = Math.floor(z / CHUNK_SIZE_Z);
+    const c = this.ensureChunk(cx, cz);
     if (!c) return AIR;
-    return c.getBlock(x - Math.floor(x / 16) * 16, y, z - Math.floor(z / 16) * 16);
+    return c.getBlock(x - cx * CHUNK_SIZE_X, y, z - cz * CHUNK_SIZE_Z);
   }
 
   getMeta(x: number, y: number, z: number): number {
     if (!this.inWorld(x, y, z)) return 0;
-    const c = this.ensureChunk(Math.floor(x / 16), Math.floor(z / 16));
+    const cx = Math.floor(x / CHUNK_SIZE_X);
+    const cz = Math.floor(z / CHUNK_SIZE_Z);
+    const c = this.ensureChunk(cx, cz);
     if (!c) return 0;
-    return c.getMeta(x - Math.floor(x / 16) * 16, y, z - Math.floor(z / 16) * 16);
+    return c.getMeta(x - cx * CHUNK_SIZE_X, y, z - cz * CHUNK_SIZE_Z);
   }
 
   /** Set a block, crossing chunk borders transparently. Marks the chunk dirty. */
   setBlock(x: number, y: number, z: number, id: number, meta = 0): void {
     if (!this.inWorld(x, y, z)) return;
-    const cx = Math.floor(x / 16);
-    const cz = Math.floor(z / 16);
+    const cx = Math.floor(x / CHUNK_SIZE_X);
+    const cz = Math.floor(z / CHUNK_SIZE_Z);
     const c = this.ensureChunk(cx, cz);
     if (!c) return;
-    c.setBlock(x - cx * 16, y, z - cz * 16, id, meta);
+    c.setBlock(x - cx * CHUNK_SIZE_X, y, z - cz * CHUNK_SIZE_Z, id, meta);
     this.markDirty(cx, cz);
   }
 
@@ -113,6 +120,22 @@ export class World {
         }
       }
     }
+  }
+
+  /**
+   * Mark the chunk containing (x, y, z) for remesh — plus its neighbors when
+   * the edit is on a chunk border (cross-border faces). Shared by game.ts
+   * setBlock and redstone tick writes (Phase 4 DRY: previously two copies of
+   * the lx/lz === 0/15 logic).
+   */
+  markDirtyAround(x: number, y: number, z: number): void {
+    if (!this.inWorld(x, y, z)) return;
+    const cx = Math.floor(x / CHUNK_SIZE_X);
+    const cz = Math.floor(z / CHUNK_SIZE_Z);
+    const lx = x - cx * CHUNK_SIZE_X;
+    const lz = z - cz * CHUNK_SIZE_Z;
+    const onBorder = lx === 0 || lx === CHUNK_SIZE_X - 1 || lz === 0 || lz === CHUNK_SIZE_Z - 1;
+    this.markDirty(cx, cz, onBorder);
   }
 
   /** Drain and return all dirty chunks (renderer calls this every frame). */
@@ -146,145 +169,6 @@ export class World {
     return { x: 0.5, y: WORLD_MAX_Y - 1, z: 0.5 };
   }
 }
-
-// ---------------------------------------------------------------------------
-// Placeholder terrain generator (Phase 1).
-// Phase 2A (src/world/terrain.ts) will replace this with the full
-// biome/ore/tree/water implementation — keep the ChunkGenerator contract.
-// ---------------------------------------------------------------------------
-
-/** mulberry32 seeded PRNG (deterministic). */
-export function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** integer 2D lattice hash → [0,1), deterministic in (x, z, seed) */
-function hash2(x: number, z: number, seed: number): number {
-  let h = seed ^ Math.imul(x, 374761393) ^ Math.imul(z, 668265263);
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  h ^= h >>> 16;
-  return (h >>> 0) / 4294967296;
-}
-
-function smooth(t: number): number {
-  return t * t * (3 - 2 * t);
-}
-
-/** 2D value noise in [0,1) */
-function valueNoise(x: number, z: number, seed: number): number {
-  const xi = Math.floor(x);
-  const zi = Math.floor(z);
-  const xf = smooth(x - xi);
-  const zf = smooth(z - zi);
-  const a = hash2(xi, zi, seed);
-  const b = hash2(xi + 1, zi, seed);
-  const c = hash2(xi, zi + 1, seed);
-  const d = hash2(xi + 1, zi + 1, seed);
-  return a + (b - a) * xf + (c - a) * zf + (a - b - c + d) * xf * zf;
-}
-
-/** 3-octave fractal value noise in [0,1) */
-export function fbmNoise(x: number, z: number, seed: number): number {
-  let sum = 0;
-  let amp = 0.5;
-  let freq = 1 / 128;
-  for (let o = 0; o < 3; o++) {
-    sum += valueNoise(x * freq, z * freq, seed + o * 1013) * amp;
-    amp *= 0.5;
-    freq *= 2;
-  }
-  return sum; // ~[0,1)
-}
-
-export const SEA_LEVEL = 60;
-export const BASE_HEIGHT = 64;
-
-/** Height at world (x, z) for the placeholder generator. */
-export function placeholderHeight(x: number, z: number, seed: number): number {
-  const n = fbmNoise(x, z, seed);
-  // base 64, amplitude ±24 → roughly 40..88
-  return Math.max(1, Math.min(255, Math.round(BASE_HEIGHT + (n - 0.5) * 2 * 24)));
-}
-
-/** Sparse oak tree: trunk 4-6, leaf canopy. Deterministic from (x, z, seed). */
-function plantTree(chunk: Chunk, lx: number, topY: number, lz: number, seed: number): void {
-  const trunkH = 4 + Math.floor(hash2(lx, lz, seed + 7777) * 3); // 4..6
-  const top = topY + trunkH;
-  // trunk
-  for (let y = topY + 1; y <= top; y++) {
-    chunk.setBlock(lx, y, lz, Block.Log);
-  }
-  // canopy: two 5x5 layers (skip some corners), then a 3x3 cap
-  for (let dy = -1; dy <= 0; dy++) {
-    for (let dx = -2; dx <= 2; dx++) {
-      for (let dz = -2; dz <= 2; dz++) {
-        if (dx === 0 && dz === 0 && dy === 0) continue; // trunk top
-        const corner = Math.abs(dx) === 2 && Math.abs(dz) === 2;
-        if (corner && hash2(lx + dx, lz + dz, seed + 991) < 0.5) continue;
-        const wx = lx + dx;
-        const wz = lz + dz;
-        if (wx < 0 || wx > 15 || wz < 0 || wz > 15) continue;
-        const y = top + dy;
-        if (y < 0 || y > 255) continue;
-        if (chunk.getBlock(wx, y, wz) === AIR) chunk.setBlock(wx, y, wz, Block.Leaves);
-      }
-    }
-  }
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      const wx = lx + dx;
-      const wz = lz + dz;
-      if (wx < 0 || wx > 15 || wz < 0 || wz > 15) continue;
-      const y = top + 1;
-      if (y > 255) continue;
-      if (chunk.getBlock(wx, y, wz) === AIR) chunk.setBlock(wx, y, wz, Block.Leaves);
-    }
-  }
-}
-
-/**
- * SIMPLE placeholder terrain (Phase 1):
- *  - value-noise heightmap, base y≈64
- *  - grass on top, 3 dirt below, stone below that
- *  - bedrock y<4, sand near/below sea level, water fills to y=60
- *  - sparse oak trees (trunk 4-6)
- * Deterministic for a given seed.
- */
-export function generateSimpleTerrain(world: World, chunk: Chunk, cx: number, cz: number): void {
-  const seed = world.seed;
-  for (let lz = 0; lz < 16; lz++) {
-    for (let lx = 0; lx < 16; lx++) {
-      const wx = cx * 16 + lx;
-      const wz = cz * 16 + lz;
-      const h = placeholderHeight(wx, wz, seed);
-      const nearWater = h <= SEA_LEVEL + 1;
-      const topBlock = nearWater ? Block.Sand : Block.Grass;
-      const midBlock = nearWater ? Block.Sand : Block.Dirt;
-      for (let y = 0; y <= h; y++) {
-        let id: number;
-        if (y < 4) id = Block.Bedrock;
-        else if (y < h - 3) id = Block.Stone;
-        else if (y < h) id = midBlock;
-        else id = topBlock;
-        chunk.setBlock(lx, y, lz, id);
-      }
-      // water from h+1 up to sea level
-      for (let y = h + 1; y <= SEA_LEVEL; y++) {
-        chunk.setBlock(lx, y, lz, WATER);
-      }
-      // sparse trees on grass, fully inside the chunk (Phase 2A handles borders)
-      if (!nearWater && h < 240 && lx >= 2 && lx <= 13 && lz >= 2 && lz <= 13) {
-        if (hash2(wx, wz, seed + 4242) < 0.006) {
-          plantTree(chunk, lx, h, lz, seed);
-        }
-      }
-    }
-  }
-}
+// The Phase 1 placeholder generator (value-noise flat-ish terrain) was
+// removed in Phase 4: the game always injects createTerrainGenerator
+// (src/world/terrain.ts), which is also the constructor default now.

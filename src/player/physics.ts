@@ -5,13 +5,13 @@
  * - WASD movement relative to camera yaw, exponential friction/accel
  * - gravity + jump; water slowdown (reduced speed + buoyancy)
  * - axis-separated AABB collision resolution against solid blocks
- * - world bounds clamp (the 4096x4096 world has hard edges)
+ * - world bounds clamp (the 256x256 world has hard edges)
  */
 
 import { PLAYER_WIDTH, PLAYER_HEIGHT, Player, blockAABB } from './player';
 import type { AABB } from './player';
 import { isSolidBlock, WATER } from '../world/blocks';
-import { WORLD_MIN_X, WORLD_MIN_Z, WORLD_SIZE_X, WORLD_SIZE_Z } from '../world/world';
+import { WORLD_MIN_X, WORLD_MIN_Z, WORLD_SIZE_X, WORLD_SIZE_Z, WORLD_MAX_Y } from '../world/world';
 
 export const GRAVITY = 30; // blocks/s^2
 export const JUMP_VELOCITY = 8.5; // ~1.2 block jump
@@ -142,8 +142,8 @@ export function stepPlayer(p: Player, input: MoveInput, getBlock: (x: number, y:
     p.y = 0;
     p.vy = Math.max(0, p.vy);
   }
-  if (p.y > 256 - PLAYER_HEIGHT) {
-    p.y = 256 - PLAYER_HEIGHT;
+  if (p.y > WORLD_MAX_Y - PLAYER_HEIGHT) {
+    p.y = WORLD_MAX_Y - PLAYER_HEIGHT;
     p.vy = Math.min(0, p.vy);
   }
 }

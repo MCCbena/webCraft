@@ -20,10 +20,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { World } from '../src/world/world';
-import { createTerrainGenerator, sampleColumn } from '../src/world/terrain';
+import { createTerrainGenerator, columnProfile } from '../src/world/terrain';
 import { buildChunkMeshData } from '../src/world/mesher';
 import type { FaceData } from '../src/world/mesher';
-import { Block, AIR, setDelay } from '../src/world/blocks';
+import { Block, AIR, getRepeaterOut, setDelay } from '../src/world/blocks';
 import { Redstone } from '../src/redstone/tick';
 import type { RedstoneCtx } from '../src/redstone/types';
 import { renderScene, encodePng, buildSoftwareAtlas } from './rasterizer';
@@ -118,7 +118,7 @@ function renderTerrainScene(): void {
 
 /** Terrain column height with a margin for trees. */
 function terrainTop(seed: number, wx: number, wz: number): number {
-  return sampleColumn(seed, Math.round(wx), Math.round(wz)).height + 6;
+  return columnProfile(seed, Math.round(wx), Math.round(wz)).height + 6;
 }
 
 /**
@@ -142,7 +142,7 @@ function pickViewpoint(
     for (let wx = -S; wx <= S; wx += 2) {
       const x = Math.floor(spawn.x) + wx;
       const z = Math.floor(spawn.z) + wz;
-      const h = sampleColumn(seed, x, z).height;
+      const h = columnProfile(seed, x, z).height;
       const dist = Math.hypot(wx, wz);
       const score = Math.abs(h - 64) + 0.02 * dist;
       candidates.push({ x, z, h, score });
@@ -176,7 +176,7 @@ function pickViewpoint(
   }
   if (!vantage) {
     // Fallback: exact spawn column.
-    const h = sampleColumn(seed, Math.floor(spawn.x), Math.floor(spawn.z)).height;
+    const h = columnProfile(seed, Math.floor(spawn.x), Math.floor(spawn.z)).height;
     vantage = { x: spawn.x, y: h + 1 + EYE_HEIGHT, z: spawn.z, h };
   }
 
@@ -187,7 +187,7 @@ function pickViewpoint(
   for (let wz = -100; wz <= 100; wz += 5) {
     for (let wx = -100; wx <= 100; wx += 5) {
       if (Math.abs(wx - vantage.x) < 12 && Math.abs(wz - vantage.z) < 12) continue;
-      const h = sampleColumn(seed, wx, wz).height;
+      const h = columnProfile(seed, wx, wz).height;
       if (h > bestH) {
         bestH = h;
         bestX = wx;
@@ -241,10 +241,10 @@ function renderRedstoneScene(): void {
   //   torch (2) → dust (3..10) → repeater (11, facing east) → lamp (12)
   world.setBlock(2, 1, 2, Block.RedstoneTorch, 1); // placed lit
   for (let x = 3; x <= 10; x++) world.setBlock(x, 1, 2, Block.RedstoneDust);
-  // facing east (+X), delay 4 ticks — with the 2C pulse semantics
-  // (output ON for `delay` ticks after a 1-tick latency), delay 4 keeps the
-  // lamp stably lit at tick 10; delay 1 would pulse ON/OFF every tick.
-  world.setBlock(11, 1, 2, Block.Repeater, setDelay(3, 4));
+  // facing east (+X), delay 1 tick — with the 1.13 sustain semantics (Phase 4:
+  // the output stays ON while the input is powered) a delay-1 repeater keeps
+  // the lamp stably lit; the old delay-4 workaround is obsolete.
+  world.setBlock(11, 1, 2, Block.Repeater, setDelay(3, 1));
   world.setBlock(12, 1, 2, Block.RedstoneLamp);
 
   // tick the network a few ticks (repeater delay = 1 tick default)
@@ -258,8 +258,7 @@ function renderRedstoneScene(): void {
   for (let i = 0; i < 10; i++) redstone.tick(world, ctx);
 
   const lampMeta = world.getMeta(12, 1, 2);
-  const repeaterMeta = world.getMeta(11, 1, 2);
-  const repeaterOut = (repeaterMeta & 0xf0) >>> 4;
+  const repeaterOut = getRepeaterOut(world.getMeta(11, 1, 2));
   const dustStrengths: number[] = [];
   for (let x = 3; x <= 10; x++) dustStrengths.push(world.getMeta(x, 1, 2));
 
@@ -303,7 +302,7 @@ function renderRedstoneScene(): void {
 
 // ---------------------------------------------------------------------------
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('verify-render.ts') || process.argv[1]?.endsWith('verify-render.mjs')) {
+if (process.argv[1]?.endsWith('verify-render.ts') || process.argv[1]?.endsWith('verify-render.mjs')) {
   console.log('WebCraft CPU render verification (no browser)');
   console.log('='.repeat(60));
   renderTerrainScene();

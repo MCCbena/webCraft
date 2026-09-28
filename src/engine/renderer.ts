@@ -10,11 +10,19 @@
 import * as THREE from 'three';
 import { buildChunkMeshData } from '../world/mesher';
 import type { FaceData } from '../world/mesher';
-import { World } from '../world/world';
+import { World, WORLD_CHUNKS_Z } from '../world/world';
+import { CHUNK_SIZE_X, CHUNK_SIZE_Z } from '../world/chunk';
 import type { Player } from '../player/player';
 import { paintAtlas, ATLAS_SIZE } from './atlas';
 
 export const RENDER_DISTANCE = 3; // ±3 chunks (7x7 = 49 chunks)
+
+/**
+ * Max chunks meshed per frame (Phase 4): meshing all newly-visible chunks
+ * synchronously caused frame hitches; the queue below spreads the work
+ * across frames, nearest-first.
+ */
+const MESH_BUDGET_PER_FRAME = 2;
 
 // ---------------------------------------------------------------------------
 // Procedural texture atlas (shared painter in ./atlas — Phase 3 DRY refactor)
@@ -52,6 +60,9 @@ export class Renderer {
   private readonly opaqueMat: THREE.MeshLambertMaterial;
   private readonly waterMat: THREE.MeshLambertMaterial;
   private readonly world: World;
+  /** Pending (re)mesh work: chunk keys, processed nearest-first, budgeted. */
+  private readonly meshQueue: number[] = [];
+  private readonly queued = new Set<number>();
 
   constructor(canvas: HTMLCanvasElement, world: World) {
     this.world = world;
@@ -88,6 +99,8 @@ export class Renderer {
   dispose(): void {
     window.removeEventListener('resize', this.resize);
     for (const k of [...this.meshes.keys()]) this.disposeChunk(k);
+    this.meshQueue.length = 0;
+    this.queued.clear();
     this.opaqueMat.map?.dispose();
     this.opaqueMat.dispose();
     this.waterMat.dispose();
@@ -103,7 +116,19 @@ export class Renderer {
   };
 
   private key(cx: number, cz: number): number {
-    return (cx + 8) * 16 + (cz + 8);
+    return (cx + 8) * WORLD_CHUNKS_Z + (cz + 8);
+  }
+
+  private static keyToChunk(k: number): { cx: number; cz: number } {
+    return { cx: Math.floor(k / WORLD_CHUNKS_Z) - 8, cz: (k % WORLD_CHUNKS_Z) - 8 };
+  }
+
+  private enqueue(cx: number, cz: number): void {
+    const k = this.key(cx, cz);
+    if (!this.queued.has(k)) {
+      this.queued.add(k);
+      this.meshQueue.push(k);
+    }
   }
 
   private static toGeometry(fd: FaceData): THREE.BufferGeometry | null {
@@ -150,21 +175,19 @@ export class Renderer {
 
   /**
    * Per-frame update:
-   *  - (re)mesh dirty chunks from World.drainDirty()
-   *  - ensure ±RENDER_DISTANCE chunks around the player are meshed
+   *  - enqueue (re)mesh work: dirty chunks from World.drainDirty() + unmeshed
+   *    chunks inside ±RENDER_DISTANCE
+   *  - mesh at most MESH_BUDGET_PER_FRAME chunks (nearest-first) so a fresh
+   *    49-chunk view spreads over a few frames instead of hitching one
    *  - drop meshes outside the render distance
    */
   update(player: Player): void {
-    for (const { cx, cz } of this.world.drainDirty()) {
-      const k = this.key(cx, cz);
-      if (this.meshes.has(k)) {
-        this.disposeChunk(k);
-        this.buildChunk(cx, cz);
-      }
-    }
+    const pcx = Math.floor(player.x / CHUNK_SIZE_X);
+    const pcz = Math.floor(player.z / CHUNK_SIZE_Z);
 
-    const pcx = Math.floor(player.x / 16);
-    const pcz = Math.floor(player.z / 16);
+    for (const { cx, cz } of this.world.drainDirty()) {
+      if (this.meshes.has(this.key(cx, cz))) this.enqueue(cx, cz); // remesh
+    }
     const needed = new Set<number>();
     for (let dx = -RENDER_DISTANCE; dx <= RENDER_DISTANCE; dx++) {
       for (let dz = -RENDER_DISTANCE; dz <= RENDER_DISTANCE; dz++) {
@@ -173,12 +196,35 @@ export class Renderer {
         if (!this.world.inChunkRange(cx, cz)) continue;
         const k = this.key(cx, cz);
         needed.add(k);
-        if (!this.meshes.has(k)) this.buildChunk(cx, cz);
+        if (!this.meshes.has(k)) this.enqueue(cx, cz);
       }
     }
+
+    // Budgeted meshing: nearest-first; unprocessed entries stay queued.
+    this.meshQueue.sort(
+      (a, b) =>
+        Renderer.chunkDistSq(a, pcx, pcz) - Renderer.chunkDistSq(b, pcx, pcz),
+    );
+    const n = Math.min(MESH_BUDGET_PER_FRAME, this.meshQueue.length);
+    for (let i = 0; i < n; i++) {
+      const k = this.meshQueue[i];
+      this.queued.delete(k);
+      const { cx, cz } = Renderer.keyToChunk(k);
+      this.disposeChunk(k);
+      this.buildChunk(cx, cz);
+    }
+    this.meshQueue.splice(0, n);
+
     for (const k of [...this.meshes.keys()]) {
       if (!needed.has(k)) this.disposeChunk(k);
     }
+  }
+
+  private static chunkDistSq(k: number, pcx: number, pcz: number): number {
+    const { cx, cz } = Renderer.keyToChunk(k);
+    const dx = cx - pcx;
+    const dz = cz - pcz;
+    return dx * dx + dz * dz;
   }
 
   render(player: Player): void {

@@ -7,9 +7,11 @@
  *
  * Timing conventions (1 tick = 50 ms):
  *  - Repeater/comparator: 1-tick latency, then `delay` ticks of output
- *    (repeater delay 1..4 from meta; comparator fixed 1). While the output
- *    is > 0 the component is LOCKED (input changes ignored). Output is
- *    captured at the input strength (preserved).
+ *    (repeater delay 1..4 from meta; comparator fixed 1). 1.13 sustain:
+ *    when the delay window expires the input is RE-SAMPLED — while the
+ *    sampled input is still > 0 the output stays ON (strength re-captured,
+ *    window restarted); only a sampled input of 0 turns the output off.
+ *    Output is captured at the input strength (preserved).
  *  - Piston: 2 ticks to extend / 2 ticks to retract. Pushes up to 12 blocks
  *    (head + chain, piston chain links allowed); fails on bedrock,
  *    non-solid blocks, or a mis-oriented piston in the chain. Sticky pulls
@@ -156,34 +158,12 @@ function applyComponentOutput(c: ComponentCtx, x: number, y: number, z: number, 
 }
 
 /**
- * Repeater/comparator state machine (same latency/sustain/lock behavior).
- * Input = power at the block behind (opposite of facing). Comparator modes:
- *  - compare:  out = max(back, side0, side1)
- *  - subtract: out = max(back - side0, 0)   (side0 = first side direction)
+ * Sample the input power at the block behind the component (opposite of
+ * facing), applying comparator side-input math. Pure read.
+ *  - compare:  max(back, side0, side1)
+ *  - subtract: max(back - side0, 0)   (side0 = first side direction)
  */
-export function tickDelayed(c: ComponentCtx, x: number, y: number, z: number, states: Map<number, DelayedState>): void {
-  const id = c.world.getBlock(x, y, z);
-  if (id !== Block.Repeater && id !== Block.Comparator) return;
-  const key = posKey(x, y, z);
-  const meta = c.world.getMeta(x, y, z);
-  const st = states.get(key);
-
-  if (st) {
-    // LOCKED: output > 0 (or latency pending) — input changes are ignored.
-    if (st.lat > 0) {
-      st.lat--;
-      if (st.lat === 0) applyComponentOutput(c, x, y, z, id, st.s);
-    } else if (st.rem > 0) {
-      st.rem--;
-      if (st.rem === 0) {
-        applyComponentOutput(c, x, y, z, id, 0);
-        states.delete(key);
-      }
-    }
-    return;
-  }
-
-  // Unlocked: sample the input.
+function sampleInput(c: ComponentCtx, x: number, y: number, z: number, id: number, meta: number): number {
   const f = getFacing(meta);
   const backX = x - FACING_X[f];
   const backZ = z - FACING_Z[f];
@@ -193,8 +173,50 @@ export function tickDelayed(c: ComponentCtx, x: number, y: number, z: number, st
     const s2 = sidePower(c, x, y, z, f, 1);
     s = getMode(meta) ? Math.max(s - s1, 0) : Math.max(s, s1, s2);
   }
+  return s;
+}
+
+/**
+ * Repeater/comparator state machine (1.13 latency + sustain semantics).
+ * While the output is on (or latency pending) the component re-samples the
+ * input only when the remaining delay expires: a still-powered input keeps
+ * the output ON (strength re-captured, window restarted); only a sampled
+ * input of 0 turns the output off (after its minimum-on time).
+ */
+export function tickDelayed(c: ComponentCtx, x: number, y: number, z: number, states: Map<number, DelayedState>): void {
+  const id = c.world.getBlock(x, y, z);
+  if (id !== Block.Repeater && id !== Block.Comparator) return;
+  const key = posKey(x, y, z);
+  const st = states.get(key);
+
+  if (st) {
+    if (st.lat > 0) {
+      st.lat--;
+      if (st.lat === 0) applyComponentOutput(c, x, y, z, id, st.s);
+    } else if (st.rem > 0) {
+      st.rem--;
+      if (st.rem === 0) {
+        // Re-sample BEFORE turning off (1.13: constant input → constant
+        // output; the pulse OFF/re-latch behavior is not 1.13).
+        const s = sampleInput(c, x, y, z, id, c.world.getMeta(x, y, z));
+        if (s > 0) {
+          const delay = id === Block.Repeater ? getDelay(c.world.getMeta(x, y, z)) : 1;
+          st.s = Math.min(s, 15);
+          st.rem = delay;
+          applyComponentOutput(c, x, y, z, id, st.s);
+        } else {
+          applyComponentOutput(c, x, y, z, id, 0);
+          states.delete(key);
+        }
+      }
+    }
+    return;
+  }
+
+  // Unlocked: sample the input.
+  const s = sampleInput(c, x, y, z, id, c.world.getMeta(x, y, z));
   if (s > 0) {
-    const delay = id === Block.Repeater ? getDelay(meta) : 1;
+    const delay = id === Block.Repeater ? getDelay(c.world.getMeta(x, y, z)) : 1;
     states.set(key, { lat: 1, rem: delay, s: Math.min(s, 15) });
   }
 }
@@ -297,10 +319,11 @@ export function isPistonPowered(c: ComponentCtx, x: number, y: number, z: number
  * 1.13 piston geometry: the base is at P, the (retracted) head occupies
  * P+d, and the pushed column starts at P+2d. Extension moves the head from
  * P+d to P+2d and shifts the column by +d; the base follows (P → P+d).
- * A correctly-oriented piston in the chain contributes its base + head.
- * Fails on: a blocked head cell, non-solid blocks, bedrock, a mis-oriented
- * piston, or a column of > 12 elements (heads included). The destination
- * must be air (water accepted as destination, simplified).
+ * 1.13 limit: up to PISTON_PUSH_LIMIT (12) PUSHED elements — the main head
+ * is not counted; a correctly-oriented chain piston contributes its
+ * base + head (2). Fails on: a blocked head cell, non-solid blocks,
+ * bedrock, a mis-oriented piston, or a pushed column of > 12 elements.
+ * The destination must be air (water accepted as destination, simplified).
  */
 export function canExtend(c: ComponentCtx, x: number, y: number, z: number, f: number): boolean {
   const dx = FACING_X[f];
@@ -308,7 +331,7 @@ export function canExtend(c: ComponentCtx, x: number, y: number, z: number, f: n
   // The pushed column starts at P+2d (the head extends from P+d into P+2d).
   let px = x + 2 * dx;
   let pz = z + 2 * dz;
-  let count = 1; // the main head
+  let count = 0; // pushed elements only (the main head is not counted)
   let skipHead = false;
   // Each chain piston skips one (its head) position, so the column can span
   // up to 2× the element limit + destination cells.
@@ -325,9 +348,8 @@ export function canExtend(c: ComponentCtx, x: number, y: number, z: number, f: n
     if (id === BEDROCK) return false;
     if (id === Block.Piston || id === Block.StickyPiston) {
       if (getFacing(c.world.getMeta(px, y, pz)) !== f) return false;
-      count++; // its base
+      count += 2; // chain piston: base + head
       skipHead = true; // its head occupies the next position
-      count++; // its head
     } else {
       count++;
     }
@@ -335,11 +357,17 @@ export function canExtend(c: ComponentCtx, x: number, y: number, z: number, f: n
     px += dx;
     pz += dz;
   }
-  return false; // more than PISTON_PUSH_LIMIT elements in the column
+  return false; // more than PISTON_PUSH_LIMIT pushed elements in the column
 }
 
-/** Collect the push column (starting at P+2d, head-aware) and enqueue the moves. */
-function extend(c: ComponentCtx, x: number, y: number, z: number, id: number, meta: number, f: number, st: PistonState, moves: PistonWrite[]): void {
+/**
+ * Collect the push column (starting at P+2d, head-aware) and enqueue the
+ * moves. Re-validates the column first (the world may have changed during
+ * the 2-tick extension countdown); returns false (no moves enqueued) when
+ * the push is no longer possible.
+ */
+function extend(c: ComponentCtx, x: number, y: number, z: number, id: number, meta: number, f: number, st: PistonState, moves: PistonWrite[]): boolean {
+  if (!canExtend(c, x, y, z, f)) return false;
   const dx = FACING_X[f];
   const dz = FACING_Z[f];
   const els: { x: number; z: number; id: number; meta: number }[] = [];
@@ -376,6 +404,7 @@ function extend(c: ComponentCtx, x: number, y: number, z: number, id: number, me
   st.frontZ = z + 3 * dz;
   st.frontId = -1; // read by tick.ts after the moves are applied
   st.frontMeta = 0;
+  return true;
 }
 
 function retract(c: ComponentCtx, x: number, y: number, z: number, id: number, f: number, st: PistonState, sticky: boolean, moves: PistonWrite[]): void {
@@ -416,9 +445,15 @@ export function tickPiston(c: ComponentCtx, x: number, y: number, z: number, sta
   }
 
   if (st.phase === 'extending') {
-    // Once started, extension completes even if power is removed (1.13).
+    // Once started, extension completes even if power is removed (1.13) —
+    // unless the push column became invalid (extend() re-validates and
+    // aborts; the piston stays put and a fresh extension can start next
+    // tick while it is powered).
     if (--st.ticks > 0) return;
-    extend(c, x, y, z, id, c.world.getMeta(x, y, z), f, st, moves);
+    if (!extend(c, x, y, z, id, c.world.getMeta(x, y, z), f, st, moves)) {
+      states.delete(key);
+      return;
+    }
     // The base moves to the head position — the runtime state follows it.
     const newX = x + FACING_X[f];
     const newZ = z + FACING_Z[f];

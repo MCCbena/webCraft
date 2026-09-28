@@ -12,12 +12,12 @@
  * - Only the chunk's non-air vertical span (minY..maxY ±1) is scanned.
  */
 
-import { AIR, WATER, SHAPE_BOXES, getBlockDef, isOn, isSideOn, getStrength, getOutput } from './blocks';
+import { AIR, WATER, SHAPE_BOXES, getBlockDef, isOn, isSideOn, getStrength, getOutput, getRepeaterOut } from './blocks';
 import type { BlockDef } from './blocks';
 import { Chunk, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z, chunkIndex } from './chunk';
-
-export const ATLAS_TILES_X = 16;
-export const ATLAS_TILES_Y = 16;
+// Atlas grid constants live in engine/atlas.ts (single source of truth —
+// Phase 4 DRY; previously redefined here).
+import { ATLAS_TILES_PER_ROW } from '../engine/atlas';
 
 export interface FaceData {
   positions: number[];
@@ -65,28 +65,19 @@ export function shouldRenderFace(selfId: number, neighborId: number): boolean {
 }
 
 /**
- * bits 4-7 — repeater output strength (written by the redstone tick; see
- * src/redstone/types.ts getRepeaterOut). Not a blocks.ts helper because the
- * output bits were added by Phase 2C.
- */
-function getRepeaterOutput(meta: number): number {
-  return (meta & 0xf0) >>> 4;
-}
-
-/**
  * Is the block in a powered/lit/on state (for litTiles)?
  *
  * Phase 3: repeaters (`facingDelay`) light up from their output strength
- * (meta bits 4-7) and comparators (`facingModeOutput`) from their output
- * strength (meta bits 3-6, `getOutput`). Facing/delay/mode bits alone never
- * power a component.
+ * (meta bits 4-7, `getRepeaterOut`) and comparators (`facingModeOutput`)
+ * from their output strength (meta bits 3-6, `getOutput`). Facing/delay/mode
+ * bits alone never power a component.
  */
 export function isPowered(id: number, meta: number): boolean {
   const kind = getBlockDef(id).meta.kind;
   if (kind === 'onOff') return isOn(meta);
   if (kind === 'facingOnOff') return isSideOn(meta);
   if (kind === 'strength') return getStrength(meta) > 0;
-  if (kind === 'facingDelay') return getRepeaterOutput(meta) > 0;
+  if (kind === 'facingDelay') return getRepeaterOut(meta) > 0;
   if (kind === 'facingModeOutput') return getOutput(meta) > 0;
   return false;
 }
@@ -100,11 +91,11 @@ function hash3(x: number, y: number, z: number): number {
 
 function addFace(fd: FaceData, face: FaceDef, wx: number, wy: number, wz: number, box: (typeof SHAPE_BOXES)['full'], tile: { top: number; side: number; bottom: number }): void {
   const tileIndex = face.axis === 1 ? (face.sign === 1 ? tile.top : tile.bottom) : tile.side;
-  const col = tileIndex % ATLAS_TILES_X;
-  const row = Math.floor(tileIndex / ATLAS_TILES_Y);
-  const u0 = col / ATLAS_TILES_X;
-  const vTop = 1 - row / ATLAS_TILES_Y;
-  const span = 1 / ATLAS_TILES_X;
+  const col = tileIndex % ATLAS_TILES_PER_ROW;
+  const row = Math.floor(tileIndex / ATLAS_TILES_PER_ROW);
+  const u0 = col / ATLAS_TILES_PER_ROW;
+  const vTop = 1 - row / ATLAS_TILES_PER_ROW;
+  const span = 1 / ATLAS_TILES_PER_ROW;
   const base = fd.positions.length / 3;
   const jitter = (hash3(wx, wy, wz) - 0.5) * 0.08;
   const b = face.brightness * (1 + jitter);
