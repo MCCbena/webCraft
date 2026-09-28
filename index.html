@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebCraft</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+      }
+      #game {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+      }
+      #hud {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 10;
+      }
+      .hud-crosshair {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 20px;
+        height: 20px;
+        transform: translate(-50%, -50%);
+      }
+      .hud-crosshair::before,
+      .hud-crosshair::after {
+        content: '';
+        position: absolute;
+        background: rgba(255, 255, 255, 0.9);
+        mix-blend-mode: difference;
+      }
+      .hud-crosshair::before {
+        left: 50%;
+        top: 0;
+        width: 2px;
+        height: 100%;
+        transform: translateX(-50%);
+      }
+      .hud-crosshair::after {
+        top: 50%;
+        left: 0;
+        height: 2px;
+        width: 100%;
+        transform: translateY(-50%);
+      }
+      .hud-info {
+        position: absolute;
+        left: 8px;
+        top: 8px;
+        color: #fff;
+        font-size: 13px;
+        line-height: 1.45;
+        text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.8);
+        white-space: pre;
+      }
+      .hud-hint {
+        position: absolute;
+        left: 50%;
+        bottom: 12px;
+        transform: translateX(-50%);
+        color: rgba(255, 255, 255, 0.85);
+        font-size: 12px;
+        text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.8);
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div id="hud"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
