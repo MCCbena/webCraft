@@ -42,7 +42,7 @@ try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
   page.on('console', (m) => console.log('[page]', m.text()));
-  page.on('pageerror', (e) => console.log('[pageerror]', e.message));
+  page.on('pageerror', (e) => console.log('[pageerror]', (e as Error).message));
 
   await page.goto(url, { waitUntil: 'load', timeout: 60000 });
 
