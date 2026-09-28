@@ -12,7 +12,7 @@
  * - Only the chunk's non-air vertical span (minY..maxY ±1) is scanned.
  */
 
-import { AIR, WATER, SHAPE_BOXES, getBlockDef, isOn, isSideOn, getStrength } from './blocks';
+import { AIR, WATER, SHAPE_BOXES, getBlockDef, isOn, isSideOn, getStrength, getOutput } from './blocks';
 import type { BlockDef } from './blocks';
 import { Chunk, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z, chunkIndex } from './chunk';
 
@@ -64,12 +64,30 @@ export function shouldRenderFace(selfId: number, neighborId: number): boolean {
   return !getBlockDef(neighborId).opaque;
 }
 
-/** Is the block in a powered/lit/on state (for litTiles)? */
+/**
+ * bits 4-7 — repeater output strength (written by the redstone tick; see
+ * src/redstone/types.ts getRepeaterOut). Not a blocks.ts helper because the
+ * output bits were added by Phase 2C.
+ */
+function getRepeaterOutput(meta: number): number {
+  return (meta & 0xf0) >>> 4;
+}
+
+/**
+ * Is the block in a powered/lit/on state (for litTiles)?
+ *
+ * Phase 3: repeaters (`facingDelay`) light up from their output strength
+ * (meta bits 4-7) and comparators (`facingModeOutput`) from their output
+ * strength (meta bits 3-6, `getOutput`). Facing/delay/mode bits alone never
+ * power a component.
+ */
 export function isPowered(id: number, meta: number): boolean {
   const kind = getBlockDef(id).meta.kind;
   if (kind === 'onOff') return isOn(meta);
   if (kind === 'facingOnOff') return isSideOn(meta);
   if (kind === 'strength') return getStrength(meta) > 0;
+  if (kind === 'facingDelay') return getRepeaterOutput(meta) > 0;
+  if (kind === 'facingModeOutput') return getOutput(meta) > 0;
   return false;
 }
 

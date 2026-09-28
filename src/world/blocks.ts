@@ -190,6 +190,7 @@ export const Tile = {
   Repeater: 25,
   RepeaterOn: 26,
   Comparator: 27,
+  ComparatorOn: 48, // Phase 3: lit comparator tile (pair for Repeater/RepeaterOn)
   PistonSide: 28,
   PistonBase: 29,
   PistonHead: 30,
@@ -271,7 +272,7 @@ export const BLOCK_DEFS: BlockDef[] = [
   def(Block.RedstoneBlock, 'redstone_block', { solid: true, opaque: true, hardness: 1.5, drop: Block.RedstoneBlock, tiles: { top: Tile.RedstoneBlock, side: Tile.RedstoneBlock, bottom: Tile.RedstoneBlock }, meta: NONE, shape: 'full' }),
   def(Block.RedstoneLamp, 'redstone_lamp', { solid: true, opaque: true, hardness: 0.3, drop: Block.RedstoneLamp, tiles: { top: Tile.RedstoneLampOff, side: Tile.RedstoneLampOff, bottom: Tile.RedstoneLampOff }, litTiles: { top: Tile.RedstoneLampLit, side: Tile.RedstoneLampLit, bottom: Tile.RedstoneLampLit }, meta: { kind: 'onOff' }, shape: 'full' }),
   def(Block.Repeater, 'repeater', { solid: false, opaque: false, hardness: 0.0, drop: Block.Repeater, tiles: { top: Tile.Repeater, side: Tile.Repeater, bottom: Tile.Repeater }, litTiles: { top: Tile.RepeaterOn, side: Tile.RepeaterOn, bottom: Tile.RepeaterOn }, meta: { kind: 'facingDelay' }, shape: 'slab' }),
-  def(Block.Comparator, 'comparator', { solid: false, opaque: false, hardness: 0.0, drop: Block.Comparator, tiles: { top: Tile.Comparator, side: Tile.Comparator, bottom: Tile.Comparator }, meta: { kind: 'facingModeOutput' }, shape: 'slab' }),
+  def(Block.Comparator, 'comparator', { solid: false, opaque: false, hardness: 0.0, drop: Block.Comparator, tiles: { top: Tile.Comparator, side: Tile.Comparator, bottom: Tile.Comparator }, litTiles: { top: Tile.ComparatorOn, side: Tile.ComparatorOn, bottom: Tile.ComparatorOn }, meta: { kind: 'facingModeOutput' }, shape: 'slab' }),
   def(Block.Piston, 'piston', { solid: true, opaque: true, hardness: 1.5, drop: Block.Piston, tiles: { top: Tile.PistonBase, side: Tile.PistonSide, bottom: Tile.PistonBase }, meta: { kind: 'facing' }, shape: 'full' }),
   def(Block.StickyPiston, 'sticky_piston', { solid: true, opaque: true, hardness: 1.5, drop: Block.StickyPiston, tiles: { top: Tile.PistonBase, side: Tile.StickyPistonSide, bottom: Tile.PistonBase }, meta: { kind: 'facing' }, shape: 'full' }),
   def(Block.Observer, 'observer', { solid: true, opaque: true, hardness: 1.5, drop: Block.Observer, tiles: { top: Tile.ObserverBack, side: Tile.ObserverSide, bottom: Tile.ObserverBack }, meta: { kind: 'facing' }, shape: 'full' }),

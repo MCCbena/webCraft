@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { Chunk } from '../src/world/chunk';
-import { Block, AIR, WATER } from '../src/world/blocks';
+import { Block, Tile, AIR, WATER, setOutput, setDelay, setFacing } from '../src/world/blocks';
 import { buildChunkMeshData, shouldRenderFace, isPowered, createFaceData } from '../src/world/mesher';
-import type { BlockAt } from '../src/world/mesher';
+import type { BlockAt, FaceData } from '../src/world/mesher';
 
 /** blockAt that returns AIR everywhere. */
 const airWorld: BlockAt = () => AIR;
@@ -91,13 +91,7 @@ describe('mesher output', () => {
     c.setBlock(8, 10, 8, Block.Grass);
     const { opaque } = buildChunkMeshData(c, 0, 0, airWorld);
     // uvs must cover at least 3 distinct tiles (grass top/side + dirt bottom)
-    const tiles = new Set<number>();
-    for (let i = 0; i < opaque.uvs.length; i += 2) {
-      const col = Math.floor(opaque.uvs[i] * 16);
-      const row = Math.floor((1 - opaque.uvs[i + 1]) * 16);
-      tiles.add(row * 16 + col);
-    }
-    expect(tiles.size).toBeGreaterThanOrEqual(3);
+    expect(tilesUsed(opaque).size).toBeGreaterThanOrEqual(3);
   });
 
   it('respects the chunk minY/maxY span (empty span → no geometry)', () => {
@@ -136,5 +130,80 @@ describe('mesher output', () => {
     expect(isPowered(Block.RedstoneLamp, 1)).toBe(true);
     expect(isPowered(Block.RedstoneDust, 0)).toBe(false);
     expect(isPowered(Block.RedstoneDust, 5)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: lit tile selection for all powered redstone components
+// ---------------------------------------------------------------------------
+
+/**
+ * Collect the distinct atlas tiles covered by a FaceData. Samples the UV
+ * centroid of each triangle: centroids of tile faces are strictly inside the
+ * tile, so boundary UVs (which would floor() into the neighboring atlas tile)
+ * never misclassify.
+ */
+function tilesUsed(fd: FaceData): Set<number> {
+  const tiles = new Set<number>();
+  for (let t = 0; t < fd.indices.length; t += 3) {
+    const i0 = fd.indices[t];
+    const i1 = fd.indices[t + 1];
+    const i2 = fd.indices[t + 2];
+    const u = (fd.uvs[i0 * 2] + fd.uvs[i1 * 2] + fd.uvs[i2 * 2]) / 3;
+    const v = (fd.uvs[i0 * 2 + 1] + fd.uvs[i1 * 2 + 1] + fd.uvs[i2 * 2 + 1]) / 3;
+    const col = Math.min(15, Math.floor(u * 16));
+    const row = Math.min(15, Math.floor((1 - v) * 16));
+    tiles.add(row * 16 + col);
+  }
+  return tiles;
+}
+
+describe('isPowered: repeater & comparator output bits (Phase 3)', () => {
+  it('repeater lights only from output strength (meta bits 4-7)', () => {
+    expect(isPowered(Block.Repeater, 0)).toBe(false);
+    // facing=3 + delay=4 (meta 7) but output=0 → unlit
+    expect(isPowered(Block.Repeater, setDelay(setFacing(0, 3), 4))).toBe(false);
+    expect(isPowered(Block.Repeater, 0x10)).toBe(true); // output 1
+    expect(isPowered(Block.Repeater, 0xf0)).toBe(true); // output 15
+    // facing/delay bits must not leak into the output field
+    expect(isPowered(Block.Repeater, setDelay(setFacing(0, 3), 4) | 0x0f)).toBe(false);
+  });
+
+  it('comparator lights only from output strength (meta bits 3-6)', () => {
+    expect(isPowered(Block.Comparator, 0)).toBe(false);
+    expect(isPowered(Block.Comparator, 0x04)).toBe(false); // subtract mode only
+    expect(isPowered(Block.Comparator, setOutput(0, 8))).toBe(true);
+    expect(isPowered(Block.Comparator, setOutput(setFacing(0, 2) | 0x04, 15))).toBe(true);
+  });
+
+  it('lit torch / lamp / repeater / comparator mesh with their lit tiles', () => {
+    const cases: Array<[number, number, number, number]> = [
+      // [block id, meta, expected lit tile, expected unlit tile]
+      [Block.RedstoneTorch, 1, Tile.RedstoneTorchOn, Tile.RedstoneTorchOff],
+      [Block.RedstoneLamp, 1, Tile.RedstoneLampLit, Tile.RedstoneLampOff],
+      [Block.Repeater, 0x10, Tile.RepeaterOn, Tile.Repeater],
+      [Block.Comparator, setOutput(0, 12), Tile.ComparatorOn, Tile.Comparator],
+    ];
+    for (const [id, meta, lit, unlit] of cases) {
+      const c = new Chunk();
+      c.setBlock(8, 10, 8, id, meta);
+      const { opaque } = buildChunkMeshData(c, 0, 0, airWorld);
+      expect(opaque.vertexCount).toBeGreaterThan(0);
+      const tiles = tilesUsed(opaque);
+      expect(tiles.has(lit), `id=${id} meta=${meta}: lit tile ${lit} present`).toBe(true);
+      expect(tiles.has(unlit), `id=${id} meta=${meta}: unlit tile ${unlit} absent`).toBe(false);
+    }
+  });
+
+  it('unpowered repeater/comparator keep their unlit tiles', () => {
+    const c = new Chunk();
+    c.setBlock(6, 10, 8, Block.Repeater, setDelay(setFacing(0, 3), 2));
+    c.setBlock(10, 10, 8, Block.Comparator, 0x04);
+    const { opaque } = buildChunkMeshData(c, 0, 0, airWorld);
+    const tiles = tilesUsed(opaque);
+    expect(tiles.has(Tile.Repeater)).toBe(true);
+    expect(tiles.has(Tile.RepeaterOn)).toBe(false);
+    expect(tiles.has(Tile.Comparator)).toBe(true);
+    expect(tiles.has(Tile.ComparatorOn)).toBe(false);
   });
 });

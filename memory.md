@@ -1,5 +1,62 @@
 # WebCraft — サブエージェント向け作業メモ
 
+## Phase 3 実装メモ (integration + render verification)
+
+### 変更点(全ファイル)
+1. **地形配線** `src/game.ts`: `new World(seed)` → `new World(s, createTerrainGenerator(s))`
+   (`s = seed ?? DEFAULT_SEED`)+ `import { createTerrainGenerator } from './world/terrain'`。
+   スポーンは実地形上(findSpawn: 列の最上 solid)。
+2. **mesher 点灯タイル** `src/world/mesher.ts`: `isPowered()` に
+   `facingDelay`(repeater: 出力=meta bits 4-7、`getRepeaterOut` と同一マスク)と
+   `facingModeOutput`(comparator: `getOutput`=bits 3-6)を追加。
+   facing/delay/mode ビットだけでは点灯しない(テスト済み)。
+   - **`src/world/blocks.ts` 編集(core所有—報告)**: タスク要求どおり lit comparator を
+     描画するため `Tile.ComparatorOn = 48` と comparator の `litTiles` を追加。
+     既存 id・ヘルパーは不変。
+3. **DRY アトラス** 新規 `src/engine/atlas.ts`: `paintAtlas(ctx: CanvasRenderingContext2D)`
+   (純 canvas 2D、three.js なし、`ATLAS_SIZE`/`TILE_PX`/`ATLAS_TILES_PER_ROW` 定数)。
+   `renderer.ts` と `icons.ts` の両方が呼ぶ(従来は ~200 行の複製)。
+   タイル索引・色は Phase 1 と同一(+ComparatorOn 48: 赤マーカーが明るい255,80,80)。
+4. **CPU ラスタライザ** 新規 `tools/rasterizer.ts` + `tools/verify-render.ts`:
+   - `renderScene(faceDatas, camera, opts)`: 透視投影(three.js YXZ 慣習、
+     forward=(-sin yaw, -cos yaw)、カメラ空間 forward=-Z)、重心座標ラスタライザ、
+     zバッファ(1/z 線形補間=平面三角形で正確)、per-vertex 輝度×純TSソフトアトラス
+     (`buildSoftwareAtlas()`=atlas.ts のミラー)、距離フォグ、空背景、背面カリング。
+   - `encodePng(w,h,rgba)`: node:zlib deflateSync + 手動 PNG チャンク(IHDR/IDAT/IEND+CRC32)。
+   - `verify-render.ts` (a) seed 1337・全256チャンク生成+findSpawn+±3チャンク実メッシャー
+     → 景観ビューポイント自動探索(スポーン近傍の平地標高で空いた場所+
+     45°刻みで前方16ブロックが下る yaw 選択)→ `screenshots/verify-terrain.png`
+     (1280×720、実測: 三角形~11万、sky~35%)。
+     (b) 全空気ワールド+石床12×12+トーチ(2,1,2)→ダスト8(3..10,1,2)→
+     リピータ(11,1,2, east, delay 4)→ランプ(12,1,2)、`Redstone.tick()`×10、
+     10ブロック先・30°俯瞰カメラ → `screenshots/verify-redstone.png`
+     (実測: ダスト 14..7、リピータ出力 7、ランプ lit=true)。
+   - 実行: `npm run verify`。**tsx を devDependency に追加**(Node 24 の型剥ぎは
+     extensionless import を解決せず、Vite 8 は rolldown 移行で esbuild 同梱なしのため)。
+5. **スモークテスト** 新規 `test/verify.test.ts`(2): 1×1チャンク平坦ワールド→
+   PNGシグネチャ+非sky>5%、空シーン→純 sky。
+
+### テスト結果
+- `npm test`: **158/158 合格**(既存152+新規6: mesher 点灯4 + ラスタライザ2)。
+- `npm run build`: 合格(tsc --noEmit + vite build)。
+- 両スクリーンショットは read_image で目視確認済み(地形=緑草原+砂+石山+空、
+  レッドストーン=ダスト列+点灯リピータ(緑ドット)+黄色ランプ)。
+
+### 既知ギャップ・判断(Phase 3)
+- **リピータのパルス挙動(2C仕様の踏襲)**: 継続入力で出力は `delay`tick ON →
+  1tick OFF → 再サンプル(真の 1.13 は入力ON中はロックで継続)。delay=1 では
+  毎tick ON/OFF 交互。検証シーンは delay 4 で tick 10 時点ランプ常点灯。
+- **CPU ラスタライザは水バッファを描画しない**(opaque 三角形のみ。
+  ブラウザでは水は半透明マテリアルで表示)。
+- **世界サイズの設計書乖離は未解決**(16×16チャンク=256×256ブロック、
+  設計書§5/§11 の 4096×4096 ではない)— Phase 1 から記録済みの要確認事項。
+- flower ブロック不在(平野の花なし)、ハッパー未実装(blocks.ts に id なし)、
+  木はチャンク内完結 — すべて従来どおり。
+- puppeteer スクリーンショット(screenshot.ts)はサンドボックスで未実行継続
+  (視覚検証は CPU ラスタライザで実施済み)。
+
+---
+
 ## 前提
 - プロジェクト: C:\Users\user\IdeaProjects\webCraft (WebCraft)
 - 設計書: docs/design.md を必ず最初に読む
@@ -20,6 +77,7 @@
 - [terrain] **Phase 2A 完了**: src/world/terrain.ts(自作 mulberry32+2D Perlin fBm、バイオーム・鉱石・樹木・水・砂漠・山岳・砂浜)、test/terrain.test.ts(17テスト)。全73テスト合格、ビルド合格
 - [modes] **Phase 2B 完了**: サバイバル/クリエイティブモード、インベントリ(36スロット)、硬度採掘+ドロップ、落下/void/溺水ダメージ・空腹・HP回復、ホットバー/心・空腹バー/F3/インベントリUI、WebAudio効果音、test/inventory.test.ts(19)+test/modes.test.ts(28)。全120テスト合格、ビルド合格
 - [redstone] **Phase 2C 完了**: src/redstone/{types,network,components,tick}.ts(1.13仕様の電力モデル+固定点ダスト伝播+全コンポーネント、20TPS同期)、game.ts 統合(tickRedstone 実装・右クリックインタラクト・facing配置)、test/redstone.test.ts(32: §8.4 全シナリオ)。全152テスト合格、ビルド合格。詳細は「Phase 2C 実装メモ」節を参照
+- [integration] **Phase 3 完了**: 地形配線(game.ts 1行+import)、mesher 点灯タイル修正(repeater/comparator+ComparatorOn タイル48追加)、DRYアトラス抽出(src/engine/atlas.ts が renderer/icons 共用)、CPUラスタライザ(tools/、`npm run verify`、terrain+redstone の2枚スクリーンショット)、スモークテスト(test/verify.test.ts)。全158テスト合格、ビルド合格。詳細は「Phase 3 実装メモ」節を参照
 
 ## Phase 1 実装メモ (Phase 2 チーム必読)
 

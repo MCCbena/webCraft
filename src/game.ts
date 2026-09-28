@@ -20,7 +20,8 @@
 import { Renderer } from './engine/renderer';
 import { GameLoop, TICK_DT } from './engine/loop';
 import { Input } from './engine/input';
-import { World } from './world/world';
+import { World, DEFAULT_SEED } from './world/world';
+import { createTerrainGenerator } from './world/terrain';
 import { Player } from './player/player';
 import { stepPlayer, GRAVITY } from './player/physics';
 import { Hud } from './ui/hud';
@@ -187,7 +188,10 @@ export class Game {
 
   constructor(canvas: HTMLCanvasElement, seed?: number) {
     this.canvas = canvas;
-    this.world = new World(seed);
+    // Phase 3: wire the Phase 2A terrain generator (replaces the Phase 1
+    // placeholder inside World). Spawn is found on the real terrain.
+    const s = seed ?? DEFAULT_SEED;
+    this.world = new World(s, createTerrainGenerator(s));
     const spawn = this.world.findSpawn();
     this.player = new Player(spawn.x, spawn.y, spawn.z);
     this.renderer = new Renderer(canvas, this.world);
