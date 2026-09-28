@@ -359,7 +359,7 @@ export function getItemDef(id: number): ItemDef | null {
 /** true when the item can be placed as a block (right-click) */
 export function isPlaceable(id: number): boolean {
   const it = ITEMS[id];
-  return it !== null && it.kind === 'block' && it.blockId !== undefined;
+  return it !== undefined && it.kind === 'block' && it.blockId !== undefined;
 }
 export function itemBlockId(id: number): number {
   const it = ITEMS[id];

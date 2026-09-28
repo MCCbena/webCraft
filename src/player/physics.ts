@@ -102,9 +102,7 @@ export function stepPlayer(p: Player, input: MoveInput, getBlock: (x: number, y:
   p.vx += (wx - p.vx) * t;
   p.vz += (wz - p.vz) * t;
 
-  p.onGround = false;
-
-  // --- vertical ---
+  // --- vertical (onGround from the previous tick is used for the jump) ---
   if (p.inWater) {
     p.vy -= WATER_GRAVITY * dt;
     if (p.vy < WATER_FALL_LIMIT) p.vy = WATER_FALL_LIMIT;
@@ -115,6 +113,7 @@ export function stepPlayer(p: Player, input: MoveInput, getBlock: (x: number, y:
       p.vy = JUMP_VELOCITY;
     }
   }
+  p.onGround = false; // re-set by collision resolution below
 
   // --- integrate with per-axis collision ---
   moveAxis(p, 'x', p.vx * dt, getBlock);

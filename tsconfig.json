@@ -13,5 +13,5 @@
     "useDefineForClassFields": true,
     "types": ["vite/client", "node"]
   },
-  "include": ["src", "test", "vite.config.ts", "screenshot.ts"]
+  "include": ["src", "test", "screenshot.ts"]
 }
