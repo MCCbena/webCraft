@@ -255,7 +255,6 @@ export class Game {
     });
     this.input.attach();
     window.addEventListener('keydown', this.onKeyDownExtra);
-    window.addEventListener('keyup', this.onKeyUpExtra);
     window.addEventListener('mousedown', this.onMouseDownExtra);
     window.addEventListener('mouseup', this.onMouseUpExtra);
     this.loop = new GameLoop({
@@ -272,7 +271,6 @@ export class Game {
     this.loop.stop();
     this.input.detach();
     window.removeEventListener('keydown', this.onKeyDownExtra);
-    window.removeEventListener('keyup', this.onKeyUpExtra);
     window.removeEventListener('mousedown', this.onMouseDownExtra);
     window.removeEventListener('mouseup', this.onMouseUpExtra);
     this.renderer.dispose();
@@ -935,10 +933,6 @@ export class Game {
     if (e.code === 'Space' && this.input.locked && this.modes.isCreative) {
       if (this.spaceTracker.press(performance.now())) this.toggleFly();
     }
-  };
-
-  private onKeyUpExtra = (e: KeyboardEvent): void => {
-    if (e.code === 'Space') this.spaceTracker.reset();
   };
 
   private onMouseDownExtra = (e: MouseEvent): void => {

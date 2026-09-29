@@ -231,6 +231,24 @@ describe('DoublePressTracker', () => {
     expect(t.press(600)).toBe(false); // first press after reset
     expect(t.press(950)).toBe(false); // 350 ms after 600 > window
   });
+
+  it('regression: real key sequence — keydown(0)→keyup(50)→keydown(200) double-presses', () => {
+    // Mirrors the game wiring in src/game.ts: press() is called on keydown only;
+    // nothing happens on keyup. A normal double-tap is press→release→press, so
+    // the second keydown must still see the first within the 300 ms window.
+    const t = new DoublePressTracker(300);
+    const firstKeyDown = t.press(0); // keydown t=0
+    // keyup t=50 → no-op (the keyup reset was removed; press-on-keydown only)
+    const secondKeyDown = t.press(200); // keydown t=200
+    expect(firstKeyDown).toBe(false);
+    expect(secondKeyDown).toBe(true);
+  });
+
+  it('regression: a slow tap (keydown t=0, keydown t=500) does not double', () => {
+    const t = new DoublePressTracker(300);
+    expect(t.press(0)).toBe(false);
+    expect(t.press(500)).toBe(false); // 500 ms > 300 ms window
+  });
 });
 
 describe('creative inventory prefill', () => {
