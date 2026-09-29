@@ -47,6 +47,7 @@ import {
   isDaylightInverted,
   getNotePitch,
   setNotePitch,
+  defaultMeta,
   setDelay,
   setMode,
   setOn,
@@ -90,6 +91,10 @@ const MAX_FRAME_DT = 0.1;
 const FPS_SMOOTHING = 0.05;
 /** Head probe offset above the feet for the drowning check. */
 const HEAD_IN_WATER_OFFSET = 1.5;
+/** Distance (blocks) at which the TNT explosion screen flash fades to zero. */
+const FLASH_DISTANCE = 8;
+/** Screen flash lifetime in ms (TNT explosion, UI-only). */
+const FLASH_MS = 350;
 
 export interface RayHit {
   x: number;
@@ -441,7 +446,7 @@ export class Game {
       // 5B: TNT explosion SFX + distance-scaled screen flash.
       onExplosion: (_x, _y, _z, dist) => {
         this.sfx.play('boom');
-        this.flash(Math.max(0, 1 - dist / 8));
+        this.flash(Math.max(0, 1 - dist / FLASH_DISTANCE));
       },
       // 5B: note block plays a note (pitch + block above for timbre).
       onNotePlay: (pitch, blockAbove) => {
@@ -725,8 +730,9 @@ export class Game {
     // repeater, comparator; Phase 5A: hopper, dispenser, dropper); redstone
     // torch stores its on-state (its meta is onOff — a facing would clobber
     // the on bit; see memory.md 2C notes). Tripwire hooks face their support
-    // block (the opposite of the placement face normal).
-    let meta = 0;
+    // block (the opposite of the placement face normal). A note block starts
+    // at the 1.13 default pitch (blocks.defaultMeta); everything else 0.
+    let meta = defaultMeta(bid);
     if (
       bid === Block.Piston ||
       bid === Block.StickyPiston ||
@@ -749,6 +755,7 @@ export class Game {
     } else if (bid === Block.RedstoneTorch) {
       meta = 1; // placed lit
     }
+    // note blocks start at the 1.13 default pitch (blocks.defaultMeta)
     this.setBlock(px, py, pz, bid, meta);
     if (!this.modes.isCreative) this.inventory.removeItem(this.selectedSlot, 1);
     this.refreshHud();
@@ -906,7 +913,7 @@ export class Game {
     });
     setTimeout(() => {
       root.removeChild(el);
-    }, 350);
+    }, FLASH_MS);
   }
 
   // --- extra input (mining hold, double-Space fly, inventory, SFX unlock) -----

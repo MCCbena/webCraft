@@ -55,6 +55,7 @@ import {
 import { CHUNK_SIZE_X, CHUNK_SIZE_Z, CHUNK_VOLUME } from '../world/chunk';
 import { WORLD_CHUNKS_Z } from '../world/world';
 import type { World } from '../world/world';
+import { PLAYER_HEIGHT } from '../player/player';
 import type { ItemStack } from '../player/inventory';
 import {
   BUTTON_TICKS_STONE,
@@ -101,6 +102,12 @@ import {
 const REGISTRY_SCAN_BUDGET = 32;
 /** Tripwire string link reach in blocks (design.md §8.7). */
 const TRIPWIRE_LINK_REACH = 40;
+/**
+ * Max DDA steps for the tripwire connection raycast: 4× the reach. A fully
+ * diagonal ray through a 40×40×40 cube needs ≤ ~120 cell steps, so this is a
+ * safe bound well beyond TRIPWIRE_LINK_REACH.
+ */
+const TRIPWIRE_DDA_MAX_STEPS = TRIPWIRE_LINK_REACH * 4;
 
 // --- Phase 5B: TNT / piston damage (design.md §8.3/§8.4) --------------------
 /** TNT fuse length in ticks (80 = 4 s, 1.13). */
@@ -113,6 +120,8 @@ export const TNT_MAX_DAMAGE = 12;
 export const TNT_DAMAGE_FALLOFF = 5;
 /** Piston-push damage when the head lands on the player (1.13). */
 export const PISTON_PUSH_DAMAGE = 2;
+/** Player center offset above the feet (half of the 1.8-tall AABB). */
+const PLAYER_CENTER_OFFSET = PLAYER_HEIGHT / 2;
 
 /** Decode a posKey back to world coords (inverse of types.posKey). */
 function decodeKey(k: number): { x: number; y: number; z: number } {
@@ -299,7 +308,7 @@ export class Redstone {
     let tMaxZ = dz !== 0 ? (dz > 0 ? z + 1 - oz : oz - z) * tDeltaZ : Infinity;
     // DDA (same stepping as game.raycast); air/tripwire are passable,
     // anything else blocks the ray; a hook is the only possible target.
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < TRIPWIRE_DDA_MAX_STEPS; i++) {
       const id = world.getBlock(x, y, z);
       if (id === Block.TripwireHook) {
         if (x === hx && y === hy && z === hz) {
@@ -755,6 +764,30 @@ export class Redstone {
   }
 
   /**
+   * Shared "power gate + N-tick cooldown" preamble for dropper/dispenser (DRY).
+   * Returns true when the action (eject/use) should fire this tick and updates
+   * the cooldown map:
+   *  - unpowered → the key is deleted (the cycle restarts on the next power-on);
+   *  - the first powered tick starts the cycle at `ticks`;
+   *  - the cycle counts down one per tick; at 0 the action fires and the cycle
+   *    restarts at `ticks` (i.e. the action fires every `ticks`-th tick).
+   */
+  private cooldownGate(map: Map<number, number>, key: number, powered: boolean, ticks: number): boolean {
+    if (!powered) {
+      map.delete(key);
+      return false;
+    }
+    if (map.get(key) === undefined) map.set(key, ticks);
+    const rem = map.get(key)! - 1;
+    if (rem > 0) {
+      map.set(key, rem);
+      return false;
+    }
+    map.set(key, ticks); // restart the cycle
+    return true;
+  }
+
+  /**
    * Dropper (1.13, §8.5): while powered, every DROPPER_COOLDOWN_TICKS ticks
    * eject one item in the facing direction. Front air + placeable block item →
    * place the block; front a container → insert one item (if room); otherwise
@@ -762,19 +795,8 @@ export class Redstone {
    */
   private tickDropper(world: World, x: number, y: number, z: number): void {
     const key = posKey(x, y, z);
-    if (totalPowerReceived(world, x, y, z, this.power) <= 0) {
-      this.dropperCooldown.delete(key);
-      return;
-    }
-    // The cycle starts (at DROPPER_COOLDOWN_TICKS) on the first powered tick and
-    // counts down; the ejection fires when it reaches 0 (i.e. after 8 ticks).
-    if (this.dropperCooldown.get(key) === undefined) this.dropperCooldown.set(key, DROPPER_COOLDOWN_TICKS);
-    const rem = this.dropperCooldown.get(key)! - 1;
-    if (rem > 0) {
-      this.dropperCooldown.set(key, rem);
-      return;
-    }
-    this.dropperCooldown.set(key, DROPPER_COOLDOWN_TICKS); // restart the cycle
+    const powered = totalPowerReceived(world, x, y, z, this.power) > 0;
+    if (!this.cooldownGate(this.dropperCooldown, key, powered, DROPPER_COOLDOWN_TICKS)) return;
     const stack = this.containers.firstItem(x, y, z);
     if (!stack) return; // empty → nothing to eject
     const f = getFacing(world.getMeta(x, y, z));
@@ -805,17 +827,8 @@ export class Redstone {
    */
   private tickDispenser(world: World, x: number, y: number, z: number): void {
     const key = posKey(x, y, z);
-    if (totalPowerReceived(world, x, y, z, this.power) <= 0) {
-      this.dispenserCooldown.delete(key);
-      return;
-    }
-    if (this.dispenserCooldown.get(key) === undefined) this.dispenserCooldown.set(key, DISPENSER_COOLDOWN_TICKS);
-    const rem = this.dispenserCooldown.get(key)! - 1;
-    if (rem > 0) {
-      this.dispenserCooldown.set(key, rem);
-      return;
-    }
-    this.dispenserCooldown.set(key, DISPENSER_COOLDOWN_TICKS); // restart the cycle
+    const powered = totalPowerReceived(world, x, y, z, this.power) > 0;
+    if (!this.cooldownGate(this.dispenserCooldown, key, powered, DISPENSER_COOLDOWN_TICKS)) return;
     const stack = this.containers.firstItem(x, y, z);
     if (!stack) return; // empty → nothing to use
     const f = getFacing(world.getMeta(x, y, z));
@@ -892,7 +905,7 @@ export class Redstone {
         }
       }
     }
-    const playerCenterY = ctx.playerY + 0.9; // feet + half the 1.8-tall AABB
+    const playerCenterY = ctx.playerY + PLAYER_CENTER_OFFSET; // feet + half the AABB
     const dist = Math.sqrt((cx - ctx.playerX) ** 2 + (cy - playerCenterY) ** 2 + (cz - ctx.playerZ) ** 2);
     const dmg = Math.max(0, Math.round(TNT_MAX_DAMAGE * (1 - dist / TNT_DAMAGE_FALLOFF)));
     if (dmg > 0) ctx.onPlayerDamage?.(dmg, 'tnt');

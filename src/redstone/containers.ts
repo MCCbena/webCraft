@@ -25,7 +25,8 @@ import { posKey } from './types';
 
 export const HOPPER_SLOTS = 5;
 export const DROPPER_SLOTS = 9;
-export const DISPENSER_SLOTS = 9;
+/** A dispenser has the same 9-slot layout as a dropper (1.13). */
+export const DISPENSER_SLOTS = DROPPER_SLOTS;
 
 /**
  * 1.13 hopper moves a bounded number of items per transfer. The task spec
@@ -45,7 +46,9 @@ export function isContainerId(id: number): boolean {
 
 /** Number of item slots a container block has (hopper 5, dropper/dispenser 9). */
 export function containerSlotCount(id: number): number {
-  return id === Block.Hopper ? HOPPER_SLOTS : 9;
+  if (id === Block.Hopper) return HOPPER_SLOTS;
+  if (id === Block.Dispenser) return DISPENSER_SLOTS;
+  return DROPPER_SLOTS;
 }
 
 export interface ContainerState {

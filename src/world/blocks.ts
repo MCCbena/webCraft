@@ -201,6 +201,16 @@ export function getNotePitch(meta: number): number {
 export function setNotePitch(meta: number, pitch: number): number {
   return (meta & ~0x1f) | (Math.min(24, Math.max(0, Math.round(pitch))) & 0x1f);
 }
+/** 1.13 default pitch of a newly placed note block (C4). */
+export const NOTE_DEFAULT_PITCH = 12;
+
+/**
+ * Default placement meta for a block id (pure — used by game.placeTarget):
+ * a note block starts at the 1.13 default pitch 12; every other block is 0.
+ */
+export function defaultMeta(id: number): number {
+  return id === Block.NoteBlock ? setNotePitch(0, NOTE_DEFAULT_PITCH) : 0;
+}
 
 // ---------------------------------------------------------------------------
 // Shapes (local box 0..1 used by the mesher)

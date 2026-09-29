@@ -33,6 +33,8 @@ import {
   setDaylightInverted,
   getNotePitch,
   setNotePitch,
+  defaultMeta,
+  NOTE_DEFAULT_PITCH,
 } from '../src/world/blocks';
 
 /** Every block name required by design.md §4. */
@@ -246,6 +248,15 @@ describe('Phase 5A block definitions (design.md §4/§8)', () => {
     }
     expect(getNotePitch(setNotePitch(0, 99))).toBe(24); // clamped to 0-24
     expect(getNotePitch(setNotePitch(0, -3))).toBe(0);
+  });
+
+  it('defaultMeta: a newly placed note block starts at the 1.13 default pitch 12', () => {
+    expect(NOTE_DEFAULT_PITCH).toBe(12);
+    expect(getNotePitch(defaultMeta(Block.NoteBlock))).toBe(12);
+    // every other block keeps the plain 0 meta
+    expect(defaultMeta(Block.Stone)).toBe(0);
+    expect(defaultMeta(Block.Tnt)).toBe(0);
+    expect(defaultMeta(Block.RedstoneTorch)).toBe(0);
   });
 
   it('meta-aware solidity: closed door solid, open door not (all other blocks unchanged)', () => {
