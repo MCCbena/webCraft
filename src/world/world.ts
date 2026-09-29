@@ -42,6 +42,14 @@ export class World {
   private readonly chunks: (Chunk | null)[] = new Array(WORLD_CHUNKS_X * WORLD_CHUNKS_Z).fill(null);
   /** chunks whose mesh needs rebuilding (drained by the renderer) */
   private readonly dirty = new Set<number>();
+  /**
+   * Phase 5A: chunks whose block data changed (or were first generated) since
+   * the last redstone-registry sync. Drained by Redstone.tick(), which
+   * re-scans them to maintain the sparse component/dust registries.
+   * (Separate from the renderer `dirty` set — redstone needs the data, the
+   * renderer only needs to know a remesh is due.)
+   */
+  private readonly redstoneChanged = new Set<number>();
   /** injectable terrain generator (Phase 2A extension point) */
   generator: ChunkGenerator;
 
@@ -76,6 +84,9 @@ export class World {
       c = new Chunk();
       this.chunks[slot] = c;
       this.generator(this, c, cx, cz);
+      // A freshly generated chunk's data is "changed" for the redstone
+      // registry (Phase 5A) — it must be scanned once.
+      this.redstoneChanged.add(slot);
     }
     return c;
   }
@@ -107,6 +118,24 @@ export class World {
     if (!c) return;
     c.setBlock(x - cx * CHUNK_SIZE_X, y, z - cz * CHUNK_SIZE_Z, id, meta);
     this.markDirty(cx, cz);
+    // Phase 5A: the redstone registry must rescan this chunk.
+    this.redstoneChanged.add(World.chunkSlot(cx, cz));
+  }
+
+  /**
+   * Phase 5A: drain up to `limit` chunk slots whose block data changed since
+   * the last redstone-registry sync (the rest stays queued for the next
+   * drain). Redstone.tick() re-scans these chunks to maintain its sparse
+   * component/dust registries.
+   */
+  drainChangedChunks(limit: number): number[] {
+    const out: number[] = [];
+    for (const slot of this.redstoneChanged) {
+      out.push(slot);
+      this.redstoneChanged.delete(slot);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   /** Mark a chunk (and optionally its neighbors, for border edits) for remesh. */

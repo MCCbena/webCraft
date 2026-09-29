@@ -1,8 +1,8 @@
 /**
  * WebCraft — Inventory screen (Phase 2B, [modes]).
- * E opens a 9x4 grid (main storage, inventory slots 9-35) above the hotbar
- * row. Simple click-to-move: click a slot to pick it up, click a target to
- * move/swap/merge; Shift-click = shift-move (hotbar <-> main).
+ * E opens a 9x5 grid (main storage, inventory slots 9-44 — Phase 5A) above
+ * the hotbar row. Simple click-to-move: click a slot to pick it up, click a
+ * target to move/swap/merge; Shift-click = shift-move (hotbar <-> main).
  * E or Esc closes the screen and re-locks the pointer (game.ts handles the
  * pointer lock transition).
  */
@@ -57,7 +57,7 @@ const CSS = `
 `;
 
 export class InventoryUI {
-  /** Click on a main-storage slot (index 9..35). */
+  /** Click on a main-storage slot (index 9..44). */
   onSlotClick?: (index: number, shift: boolean) => void;
 
   private readonly root: HTMLElement;
@@ -76,7 +76,7 @@ export class InventoryUI {
     return this.panel !== null;
   }
 
-  /** Build and show the 9x4 grid (no-op when already open). */
+  /** Build and show the 9x5 grid (no-op when already open). */
   open(): void {
     if (this.panel) return;
     this.slotEls = [];

@@ -19,8 +19,12 @@ function flatWorld(): World {
   });
 }
 
+/** Phase 5A: meta-aware block probe (id + meta) for physics. */
 function getBlock(w: World) {
-  return (x: number, y: number, z: number): number => w.getBlock(x, y, z);
+  return (x: number, y: number, z: number): { id: number; meta: number } => ({
+    id: w.getBlock(x, y, z),
+    meta: w.getMeta(x, y, z),
+  });
 }
 
 function settle(p: Player, w: World, ticks = 200, input = emptyInput()): void {
@@ -130,6 +134,45 @@ describe('player collision', () => {
     const p = new Player(-127.9, 11, 0.5);
     settle(p, w, 200, { ...emptyInput(), left: true });
     expect(p.x).toBeGreaterThanOrEqual(-128 + 0.3 - 0.001);
+  });
+});
+
+/**
+ * Phase 5A: meta-aware door solidity — a CLOSED oak door (both halves,
+ * open bit unset) blocks the player; an OPEN door (open bit set) does not.
+ */
+describe('oak door solidity (meta-aware, Phase 5A)', () => {
+  /** Flat floor (surface y=11) + a door column at x=5 (bottom y=11, top y=12). */
+  function doorWorld(open: boolean): World {
+    const w = flatWorld();
+    const meta = open ? 0x04 : 0;
+    w.setBlock(5, 11, 0, Block.OakDoor, meta); // bottom half
+    w.setBlock(5, 12, 0, Block.OakDoor, open ? 0x06 : 0x02); // top half (top bit)
+    return w;
+  }
+
+  it('a closed door blocks the player (wall-like collision)', () => {
+    const w = doorWorld(false);
+    const p = new Player(2.5, 11, 0.5);
+    settle(p, w, 300, { ...emptyInput(), right: true });
+    // player center must stop at least half a width in front of the door face
+    expect(p.x).toBeLessThan(5 - 0.3);
+  });
+
+  it('an open door does not block the player (walks through)', () => {
+    const w = doorWorld(true);
+    const p = new Player(2.5, 11, 0.5);
+    settle(p, w, 300, { ...emptyInput(), right: true });
+    // player passed through the door cell and kept walking to the right
+    expect(p.x).toBeGreaterThan(6);
+  });
+
+  it('aabbHitsSolid: closed door cell is solid, open door cell is not', () => {
+    const closed = doorWorld(false);
+    const open = doorWorld(true);
+    const box = { minX: 5.1, minY: 11.1, minZ: -0.2, maxX: 5.9, maxY: 12.9, maxZ: 0.2 };
+    expect(aabbHitsSolid(box, getBlock(closed))).toBe(true);
+    expect(aabbHitsSolid(box, getBlock(open))).toBe(false);
   });
 });
 

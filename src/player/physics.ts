@@ -10,8 +10,16 @@
 
 import { PLAYER_WIDTH, PLAYER_HEIGHT, Player, blockAABB } from './player';
 import type { AABB } from './player';
-import { isSolidBlock, WATER } from '../world/blocks';
+import { isSolidBlockAt, WATER } from '../world/blocks';
 import { WORLD_MIN_X, WORLD_MIN_Z, WORLD_SIZE_X, WORLD_SIZE_Z, WORLD_MAX_Y } from '../world/world';
+
+/**
+ * Phase 5A: the physics block probe returns id AND meta so solidity can be
+ * meta-aware (a closed oak door is solid; an open one is not — see
+ * blocks.isSolidBlockAt). Callers pass e.g.
+ *   (x, y, z) => ({ id: world.getBlock(x, y, z), meta: world.getMeta(x, y, z) })
+ */
+export type BlockProbe = (x: number, y: number, z: number) => { id: number; meta: number };
 
 export const GRAVITY = 30; // blocks/s^2
 export const JUMP_VELOCITY = 8.5; // ~1.2 block jump
@@ -38,7 +46,7 @@ export function emptyInput(): MoveInput {
 }
 
 /** Does the AABB overlap any solid block? */
-export function aabbHitsSolid(aabb: AABB, getBlock: (x: number, y: number, z: number) => number): boolean {
+export function aabbHitsSolid(aabb: AABB, getBlock: BlockProbe): boolean {
   const x0 = Math.floor(aabb.minX);
   const x1 = Math.floor(aabb.maxX - EPS);
   const y0 = Math.floor(aabb.minY);
@@ -48,7 +56,8 @@ export function aabbHitsSolid(aabb: AABB, getBlock: (x: number, y: number, z: nu
   for (let x = x0; x <= x1; x++) {
     for (let y = y0; y <= y1; y++) {
       for (let z = z0; z <= z1; z++) {
-        if (isSolidBlock(getBlock(x, y, z))) return true;
+        const b = getBlock(x, y, z);
+        if (isSolidBlockAt(b.id, b.meta)) return true;
       }
     }
   }
@@ -56,10 +65,10 @@ export function aabbHitsSolid(aabb: AABB, getBlock: (x: number, y: number, z: nu
 }
 
 /** Advance the player by one fixed tick (dt in seconds, normally 0.05). */
-export function stepPlayer(p: Player, input: MoveInput, getBlock: (x: number, y: number, z: number) => number, dt: number): void {
+export function stepPlayer(p: Player, input: MoveInput, getBlock: BlockProbe, dt: number): void {
   // --- environment ---
-  const bodyBlock = getBlock(Math.floor(p.x), Math.floor(p.y + 0.4), Math.floor(p.z));
-  p.inWater = bodyBlock === WATER;
+  const body = getBlock(Math.floor(p.x), Math.floor(p.y + 0.4), Math.floor(p.z));
+  p.inWater = body.id === WATER;
 
   // --- horizontal wish direction (camera-relative) ---
   const sin = Math.sin(p.yaw);
@@ -148,7 +157,7 @@ export function stepPlayer(p: Player, input: MoveInput, getBlock: (x: number, y:
   }
 }
 
-function moveAxis(p: Player, axis: 'x' | 'y' | 'z', amount: number, getBlock: (x: number, y: number, z: number) => number): void {
+function moveAxis(p: Player, axis: 'x' | 'y' | 'z', amount: number, getBlock: BlockProbe): void {
   if (amount === 0) return;
   p[axis] += amount;
   for (;;) {
@@ -163,7 +172,8 @@ function moveAxis(p: Player, axis: 'x' | 'y' | 'z', amount: number, getBlock: (x
     for (let x = x0; x <= x1 && !resolved; x++) {
       for (let y = y0; y <= y1 && !resolved; y++) {
         for (let z = z0; z <= z1 && !resolved; z++) {
-          if (!isSolidBlock(getBlock(x, y, z))) continue;
+          const blk = getBlock(x, y, z);
+          if (!isSolidBlockAt(blk.id, blk.meta)) continue;
           const b = blockAABB(x, y, z);
           if (!Player.boxesIntersect(box, b)) continue;
           if (axis === 'x') {

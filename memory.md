@@ -146,6 +146,147 @@ if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust && getStrength(world.getM
 
 ---
 
+## Phase 5A 実装メモ (complete 1.13 redstone data layer + power model)
+
+### 新規ブロック id / meta レイアウト (blocks.ts)
+- 新規 id(既存は不変、末尾追加): `Hopper 37` / `DaylightDetector 38` / `Tnt 39` /
+  `NoteBlock 40` / `Rail 41` / `PoweredRail 42` / `Tripwire 43`(弦ライン本体)。
+  (TripwireHook 32 / Dispenser 33 / Dropper 34 / OakDoor 36 は 5A 以前に定義済み。)
+- meta レイアウト:
+  - **door** (kind `door`): bit 1 = 上半分 (`isDoorTop`/`setDoorTop`, `DOOR_TOP_BIT 0x02`)、
+    bit 2 = 開 (`isDoorOpen`/`setDoorOpen`, `DOOR_OPEN_BIT 0x04`)。
+    閉=ソリッド(`isSolidBlockAt`: `!isDoorOpen`)、開=非ソリッド。
+  - **daylight** (kind `daylight`): bit 1 = 反転 (`isDaylightInverted`/`setDaylightInverted`、
+    DOOR_TOP_BIT を共用)。
+  - **note** (kind `note`): bits 0-4 = 音階 pitch 0-24 (`getNotePitch`/`setNotePitch`、
+    クランプ付き)。
+  - **facingOnOff** (tripwire_hook): bits 0-1 facing、bit 2 = 弦保有 (`setSideOn`)。
+  - **onOff** (TNT): bit 0 = 着火(primed)。litTiles → `TntPrimed`(白)。
+- アイテム: `Item.TripwireString = 136`("tripwire"、非配置可能 — フック右クリックで
+  使用のみ。生存モードで消費)。
+
+### アトラスタイル (Tile enum, 41..59)
+TripwireHook 41 / DispenserSide 42 / DispenserFront 43 / DropperSide 44 /
+DropperFront 45 / Torch 46 / OakDoor 47 / Hopper 49 / DaylightDetector 50 /
+TntSide 51 / TntTop 52 / TntPrimed 53 / NoteBlock 54 / Rail 55 / PoweredRail 56 /
+TripwireString 57 / DoorBottom 58 / DoorTop 59(48 = Phase 3 の ComparatorOn)。
+
+### メッシャー形状 (blocks.ts `SHAPE_BOXES`)
+新規 shape: `hook`(0.375..0.625 × y0.5..1 × 0.375..0.625)/ `hopper`(0.05..0.95 ×
+0.95高)/ `rail`(幅0.94 × 高0.125 平底)/ `string`(幅1/8 = 0.4375..0.5625 の全高細線)。
+ドアは `full` shape のまま(開閉でソリッド性のみ切替)。
+
+### 電力モデル追加 (network.ts, §8.1 準拠)
+- **dust が上のブロックに弱給電**: `weakPowerFromBelow(world, x, y, z, p)` —
+  直下ダスト strength>0 のときその strength。使用: 点灯トーチ判定(components.ts
+  `tickTorch`)、ランプ(`totalPowerReceived`)、ドア(下記)、パワーレール。
+- `totalPowerReceived`: 6隣接(水平4+上=弱、下=強)+ dust-above ルールの最大値。
+  **ランプ専用**(1.13: 圧力プレートは純センサー — 電力では ON しない。
+  プレートは `tickPlate` が entityAbove のみで判定)。
+- `isRailPowered` (PoweredRail): 下のブロックが強給電 OR 水平隣が弱給電(ダスト
+  含む)OR 直下ダストが弱給電 → `directPower` = 15(弱=水平4+ダストへ14、強=上)。
+- `directPower` の新規 source: TripwireHook(トリガー中=15、`PowerCtx.trippedHook`)、
+  PoweredRail(`isRailPowered`)、DaylightDetector(`daylightOutput(worldTime,
+  inverted)`)。コンテナ(Hopper/Dispenser/Dropper)は**一般 source ではなく**
+  `powerFromNeighbor` 内で「中身あり(`PowerCtx.hasItems`)→ 後方のブロックのみ
+  弱15」を処理(§8.1)。
+- 昼光センサーは**下のブロックにも弱給電**(§8.1: 弱=水平4+下、強=上)—
+  `powerFromNeighbor`(上方向)と `computeDustTarget`(上段センサー分)で両対応。
+
+### 全ワールドアクティブ領域 (tick.ts, §8.2 — 旧 3×3 チャンク宇宙スキャン廃止)
+- 疎レジストリ: `components` / `dust`(posKey → {x,y,z,id})。`REDSTONE_COMPONENT_IDS`
+  (types.ts) = 毎tick状態機械が必要な id 群(Tnt/NoteBlock/Hopper/Dispenser/Dropper
+  は **5B 占位**として登録済み、tick case は 5B 追加)。ダストは別セット。
+- 増分同期: `World.drainChangedChunks(budget=32)` で変更チャンクのみ再スキャン
+  (`syncRegistry`)。ピストン移動は `patchRegistry` で即座にパッチ。
+- `worldEdit(world, x, y, z, id, meta)` が**ゲーム/テストの唯一の世界書き込み経路**
+  (setBlock+markDirtyAround+トリップワイヤ弦の維持: フック除去/弦セル置換で切断)。
+
+### 昼夜サイクル (新規 src/world/time.ts)
+- `DAY_LENGTH_TICKS 24000` / `DAY_HALF_TICKS 12000` / `START_TIME 1000`(1.13 既定)。
+- `daylightOutput(t, inverted)` = `clamp(round(15·max(0, sin(π·t/12000))), 0, 15)`
+  (昼 0≤t≤12000、夜=0、反転=15−出力)。`wrapTime` で 0..23999 に巻き戻し。
+- `sunElevation(t)` = `sin(2π·t/24000)`(空色/フォグの lerp 用)。**判断**: 5A タスク
+  本文の `sin(2πt/24000 − π/2)` はピークが t=12000(日没)と 1.13 センサー式と半日
+  ずれるため、シフトなし版を採用(正午 t=6000 で+1)。time.test.ts で固定。
+- game.ts 統合: `readonly clock = new WorldClock()`、20TPS tick で `clock.tick()`、
+  redstone ctx に `worldTime: this.clock.time`、毎フレーム `renderer.updateSky(time)`。
+
+### ドア (components.ts `doorPowered` / `tickDoor`, tick.ts `toggleDoor`)
+- **電力ルール(1.13、判定済み)**: 下半分が (a) 水平4隣接の弱電力、(b) **直下からの
+  弱電力(点灯ダスト — dust が上ブロックに弱給電するため)**、(c) 直下からの強電力
+  (レッドストーンブロック等) のいずれかを受ければ開く。電力喪失で閉じる。
+- 下半分が駆動し上半分の open ビットは同期。`isSolidBlockAt` で閉=ソリッド衝突。
+- `toggleDoor`: 上下どちらでもトグル。**給電中はロック(右クリック無視)**。
+  手動開放は `doors` Map(下半分 posKey)保持、電力喪失後も開放維持。
+- 配置: `placeTarget` が**上下2半分を1アイテムで配置**(上半分 meta=DOOR_TOP_BIT、
+  配置先がプレイヤー AABB と交差したら拒否 — 閉ドアはソリッド)。
+
+### トライブワイル (tick.ts)
+- **状態 API**: `tryConnectTripwire(world, hook, eyePos, eyeDir)` — DDA レイキャスト
+  (40ブロックまで、game.raycast と同手順)。同一Yの水平1軸線 or 同X/Zの垂直線で、
+  中間が全て air/弦、かつ両端とも未接続なら成功: 中間セルに `Block.Tripwire` を
+  配置+双方フックの bit 2(弦保有)を立て+ `tripwireLinks` に双方向記録。
+- **トリガー**: 毎tick、`ctx.entityAbove`(プレイヤー AABB)が弦セルと交差 →
+  **両端フック**が `trippedHooks` 入り → 電力モデルで 15 出力(弦存在間継続)。
+- **切断**: `worldEdit`(フック採掘/弦セルへの任意ブロック配置)、ピストン押出で固体
+  が弦セルに着地した場合も。`isHookTripped(x,y,z)` でクエリ。
+- **ゲームフロー**: 弦アイテム(`Item.TripwireString`)手持ちでフック右クリック →
+  `interactWith` の `Block.TripwireHook` case が `tryConnectTripwire` を呼び、
+  成功で生存モードのみ 1 消費。
+
+### レール (§8.8)
+- `Rail`/`PoweredRail`: 非ソリッド、`shape: 'rail'`。パワーレールは給電時に
+  source(弱=水平4→ダストへ14、強=上)。給電判定は `isRailPowered`(上段参照)。
+  (マインカートはスコープ外 — 設計書 §8.8 通り。)
+
+### テスト結果
+- `npm test`: **209/209 合格**(5A 新規: redstone5a.test.ts 24 + time.test.ts 10 +
+  blocks.test 追加等)。`npm run build`: 合格(tsc --noEmit + vite build、
+  `dist/assets/game.js` = 604,742 bytes、fixed-name 維持)。
+- **2件の誤期待テストを判定どおりに修正**(詳細は下段の「判断」参照):
+  プレート=純センサー化 / ドアは直下ダスト(弱電力)で開く。
+
+### Phase 5B への契約(厳守)
+1. **`ctx.hasItems(x, y, z)` フック** — `RedstoneCtx.hasItems?`(types.ts、省略時
+   既定 false)。game.ts の redstone ctx 構築(≈422行目)に 5B のコンテナ中身系
+   で実装を渡す。消費側は network.ts `powerFromNeighbor` の Hopper/Dispenser/
+   Dropper case(後方のブロックのみ弱15、§8.1)。
+2. **TNT 着火エントリポイント** — `Redstone.primeTnt(world, x, y, z)`(tick.ts):
+   TNT の meta bit 0(`setOn`)を立て+markDirty(メッシャーが TntPrimed 白タイルに切替)。
+   5B は `Redstone.tick()` の switch(「Phase 5B cases」コメント处)に `Block.Tnt`
+   case を追加し **fuse 80tick カウントダウン → 爆発**(半径4・bedrock 以外を破壊
+   (ドロップなし)・プレイヤー距離減衰ダメージ 中心12→端0)を実装。
+   着火源(§8.4「給電で着火」)も 5B が primeTnt 経由で発火させる。
+3. **音符ブロックの pitch meta アクセス** — blocks.ts `getNotePitch`/`setNotePitch`
+   (bits 0-4、0-24 クランプ)。5B は tick switch に `Block.NoteBlock` case を追加し
+   給電立ち上がりで `80 * 2^(n/12)` Hz 発音(上段ブロックで音色変化)、右クリック
+   pitch サイクルは game.ts `interactWith` に case 追加。
+4. **コンテナ GUI 統合ポイント** — game.ts `interactWith(hit)` switch(≈600行目)に
+   `case Block.Hopper / Dispenser / Dropper:` を追加し右クリックでコンテナ GUI
+   (9/5 スロット+プレイヤーインベントリ、クリック移動、E/Esc 閉じ)を開く。
+   既存 `InventoryUI`(src/ui/inventoryUI.ts)のパターンを拡張。現状これら id は
+   `interactWith` が false を返し placeTarget に落ちる(空気ではないので何もしない)。
+   ハッパー伝送(上→ハッパー→下、8tick間隔・1回2アイテム)/ ドロッパー射出 /
+   ディスペンサ「使用」の tick case も 5B。
+
+### 判断(要報告)
+- **圧力プレート = 純センサー(1.13)**: 前サブエージェントが「直下ダスト/下方強
+  電力/水平電力でプレートが ON」を実装していたが、Java 1.13 では圧力プレートは
+  エンティティ検出のみ(電力では作動しない)。`tickPlate` を entityAbove のみに
+  修正、不要化した `platePowered` を削除。テストを「点灯ダスト上のプレートは
+  OFF のまま(エンティティで踏圧すると ON)」に置換(1.13 セマンティクス固定)。
+- **ドアは直下ダストで開く(1.13)**: 前サブエージェントの「弱電力では開かない」
+  実装は誤り。dust は上ブロックに弱給電するため、下半分が「水平4弱 / 直下弱
+  (ダスト)/ 直下強」のいずれでも開くのが 1.13。`doorPowered` を修正、テストを
+  「powered dust below opens the door (weak power from below counts, 1.13)」
+  に改名+逆転(給電除去で閉じる確認も追加)。レッドストーンブロック下テストは
+  既存のまま緑。
+- **`totalPowerReceived` はランプ専用**に(プレートの電力応答を撤去したため)。
+  ドキュメントコメントも更新済み。
+
+---
+
 ## Phase 3 実装メモ (integration + render verification)
 
 ### 変更点(全ファイル)
@@ -227,6 +368,7 @@ if (world.getBlock(cx2, y, cz2) === Block.RedstoneDust && getStrength(world.getM
 - [fixes] **Phase 4 完了**: レビュー指摘13項目全修正(リピータ持続/落下ダメージ/ピストン上限/extend再検証/ラインルール/トーチ強電力/アイル上限/メッシュ予算/placeTarget(hit)/256×256仕様確定 + DRY・マジックナンバー・デッドコード)。全160テスト合格、ビルド合格、verify 2枚目視確認。詳細は「Phase 4 実装メモ」節を参照
 - [fixes] **Phase 4b 完了**: ラインルールを Phase 2C の exactly-15 に**復帰**(4bの数式 `sC > sN ? sC : sC - 1` はザグザグ均衡+自己持続ラインを引き起こし 1.13 非準拠と確定)。テスト復元(減衰=単調14,13,...,0 / 決定論出力=7 / back入力=12)+ sub-15テスト削除 + 新規「no self-sustain」テスト。design.md §8.2 文言置換。詳細は「Phase 4b 実装メモ」節を参照
 - [polish] **最終polish完了**: (1) design.md §8.4 減衰文言を実装と整合に修正(「14マス目=強度1、15マス目で0（単調減衰）」)。(2) `tickTorch` に 1.13 忠実な「下段ダスト(strength>0)で消灯」を追加(上段からの給電はダストに効かないため安定)。新規テスト2件(点灯ダスト上のトーチ1tickで消灯 / 非点灯ダスト上は点灯維持)。全162テスト合格、ビルド合格
+- [redstone] **Phase 5A 完了**: 1.13 完全版データ層+電力モデル(新規ブロック Hopper/DaylightDetector/Tnt/NoteBlock/Rail/PoweredRail/Tripwire + 既存 TripwireHook/Dispenser/Dropper/OakDoor 全実装)、dust-上ブロック弱給電+全ワールドアクティブ領域(疎レジストリ+変更チャンク増分スキャン)、昼夜サイクル(time.ts 24000tick/日)、ドア(上下2半分+1.13電力ルール+手動トグル+ソリッド性)、トリップワイヤ(接続/トリガー/切断+弦アイテム)、パワーレール。誤期待テスト2件を判定どおりに修正(プレート=純センサー / ドアは直下ダストで開く)。全209テスト合格、ビルド合格。5B 契約4件(hasItems / TNT着火 / note pitch / コンテナGUI)を「Phase 5A 実装メモ」節に明記
 - [fixes] **ユーザー報告バグ2件修正**: (1) インベントリスロットクリック無効 — `#hud{pointer-events:none}`(index.html)が子要素も食っており、`src/ui/inventoryUI.ts` の `.inventory-panel` ルールに `pointer-events:auto` を追加(スロットはパネルから継承、ホットバーと同パターン)。(2) 水から出られない — `src/player/physics.ts` の `WATER_JUMP_VELOCITY` を 4.5→9 に(9²/60=1.35ブロックで1段の岸を越えられる。ジャンプ維持で毎tick vy=9 更新のため深水の底から表面への上昇も保証。持続上昇キャップ案は岸越え要件(1.0ブロック)と両立しないため未採用)。新規テスト2件(1段岸ジャンプ脱出 / 5段プール水面到達)。全164テスト合格、ビルド合格
 
 ## Phase 1 実装メモ (Phase 2 チーム必読)

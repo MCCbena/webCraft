@@ -40,6 +40,9 @@ import {
   getOutput,
   getStrength,
   isOn,
+  isDoorOpen,
+  isDoorTop,
+  setDoorOpen,
   setOn,
   setOutput,
 } from '../world/blocks';
@@ -58,8 +61,9 @@ import {
   inputPowerAt,
   powerFromNeighbor,
   strongPowerToAbove,
+  totalPowerReceived,
   weakPower,
-  type ObserverState,
+  type PowerCtx,
 } from './network';
 
 /** Batched world write (applied by tick.ts after the state-machine phase). */
@@ -74,7 +78,8 @@ export interface PistonWrite {
 /** Context shared by all component machines. */
 export interface ComponentCtx {
   world: World;
-  observers: ObserverState;
+  /** Phase 5A: runtime power context (observers + tripped hooks + items + time). */
+  power: PowerCtx;
   /** World write with remesh dirty-marking (provided by tick.ts). */
   write(x: number, y: number, z: number, id: number, meta: number): void;
 }
@@ -97,7 +102,7 @@ export function tickTorch(c: ComponentCtx, x: number, y: number, z: number): boo
     const nx = x + FACING_X[f];
     const nz = z + FACING_Z[f];
     if (c.world.getBlock(nx, y, nz) === Block.RedstoneDust) continue;
-    if (powerFromNeighbor(c.world, x, y, z, nx, y, nz, c.observers) > 0) powered = true;
+    if (powerFromNeighbor(c.world, x, y, z, nx, y, nz, c.power) > 0) powered = true;
   }
   if (!powered && y > 0) {
     const below = c.world.getBlock(x, y - 1, z);
@@ -105,7 +110,7 @@ export function tickTorch(c: ComponentCtx, x: number, y: number, z: number): boo
       // 1.13: powered dust weakly powers the block directly above it.
       powered = getStrength(c.world.getMeta(x, y - 1, z)) > 0;
     } else {
-      powered = strongPowerToAbove(c.world, x, y - 1, z, c.observers) > 0;
+      powered = strongPowerToAbove(c.world, x, y - 1, z, c.power) > 0;
     }
   }
   const on = !powered;
@@ -117,17 +122,15 @@ export function tickTorch(c: ComponentCtx, x: number, y: number, z: number): boo
   return false;
 }
 
-/** Lamp: on when any of the 6 neighbors powers it (below via strong power). */
+/**
+ * Lamp: on when powered from any of the 6 neighbors (below via strong
+ * power) — Phase 5A: including powered dust directly below (1.13 dust-above
+ * rule, via totalPowerReceived).
+ */
 export function tickLamp(c: ComponentCtx, x: number, y: number, z: number): boolean {
   const id = c.world.getBlock(x, y, z);
   if (id !== Block.RedstoneLamp) return false;
-  let powered = false;
-  for (let f = 0; f < 4 && !powered; f++) {
-    if (powerFromNeighbor(c.world, x, y, z, x + FACING_X[f], y, z + FACING_Z[f], c.observers) > 0) powered = true;
-  }
-  if (!powered && y < 255 && powerFromNeighbor(c.world, x, y, z, x, y + 1, z, c.observers) > 0) powered = true;
-  if (!powered && y > 0 && strongPowerToAbove(c.world, x, y - 1, z, c.observers) > 0) powered = true;
-  const on = powered;
+  const on = totalPowerReceived(c.world, x, y, z, c.power) > 0;
   const meta = c.world.getMeta(x, y, z);
   if (isOn(meta) !== on) {
     c.write(x, y, z, id, setOn(meta, on));
@@ -155,7 +158,7 @@ export interface DelayedState {
 function sidePower(c: ComponentCtx, x: number, y: number, z: number, facing: number, which: number): number {
   const dx = which === 0 ? FACING_Z[facing] : -FACING_Z[facing];
   const dz = which === 0 ? -FACING_X[facing] : FACING_X[facing];
-  return weakPower(c.world, x + dx, y, z + dz, c.observers);
+  return weakPower(c.world, x + dx, y, z + dz, c.power);
 }
 
 function applyComponentOutput(c: ComponentCtx, x: number, y: number, z: number, id: number, s: number): void {
@@ -174,7 +177,7 @@ function sampleInput(c: ComponentCtx, x: number, y: number, z: number, id: numbe
   const f = getFacing(meta);
   const backX = x - FACING_X[f];
   const backZ = z - FACING_Z[f];
-  let s = inputPowerAt(c.world, backX, y, backZ, c.observers);
+  let s = inputPowerAt(c.world, backX, y, backZ, c.power);
   if (id === Block.Comparator) {
     const s1 = sidePower(c, x, y, z, f, 0);
     const s2 = sidePower(c, x, y, z, f, 1);
@@ -293,6 +296,10 @@ export function tickButton(c: ComponentCtx, x: number, y: number, z: number, tim
 export function tickPlate(c: ComponentCtx, x: number, y: number, z: number, entityAbove: (x: number, y: number, z: number) => boolean): void {
   const id = c.world.getBlock(x, y, z);
   if (id !== Block.StonePressurePlate && id !== Block.WoodPressurePlate) return;
+  // 1.13: the pressure plate is a pure SENSOR — it outputs 15 only while an
+  // entity overlaps the space directly above it. Redstone power (powered
+  // dust below, a redstone block below, a horizontal source) does NOT
+  // activate a pressure plate.
   const on = y < 255 && entityAbove(x, y + 1, z);
   const meta = c.world.getMeta(x, y, z);
   if (isOn(meta) !== on) c.write(x, y, z, id, setOn(meta, on));
@@ -317,9 +324,9 @@ export interface PistonState {
 /** Piston power: 4 horizontal neighbors (weak) + the block below (strong). */
 export function isPistonPowered(c: ComponentCtx, x: number, y: number, z: number): boolean {
   for (let f = 0; f < 4; f++) {
-    if (powerFromNeighbor(c.world, x, y, z, x + FACING_X[f], y, z + FACING_Z[f], c.observers) > 0) return true;
+    if (powerFromNeighbor(c.world, x, y, z, x + FACING_X[f], y, z + FACING_Z[f], c.power) > 0) return true;
   }
-  return y > 0 && strongPowerToAbove(c.world, x, y - 1, z, c.observers) > 0;
+  return y > 0 && strongPowerToAbove(c.world, x, y - 1, z, c.power) > 0;
 }
 
 /**
@@ -434,6 +441,51 @@ function retract(c: ComponentCtx, x: number, y: number, z: number, id: number, f
       moves.push({ x: x + dx, y, z: z + dz, id: curId, meta: curMeta });
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Oak door (Phase 5A, design.md §8.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Door power (design.md §8.4, 1.13): the BOTTOM half opens when it receives
+ * ANY signal:
+ *  - weak power from its 4 horizontal neighbors,
+ *  - weak power from the block directly below (1.13: powered dust weak-powers
+ *    the block directly above it — so dust below a door opens it),
+ *  - strong power from the block directly below (e.g. a redstone block).
+ */
+export function doorPowered(c: ComponentCtx, x: number, y: number, z: number): boolean {
+  for (let f = 0; f < 4; f++) {
+    if (powerFromNeighbor(c.world, x, y, z, x + FACING_X[f], y, z + FACING_Z[f], c.power) > 0) return true;
+  }
+  if (y > 0) {
+    const below = c.world.getBlock(x, y - 1, z);
+    if (below === Block.RedstoneDust) return getStrength(c.world.getMeta(x, y - 1, z)) > 0;
+    return strongPowerToAbove(c.world, x, y - 1, z, c.power) > 0;
+  }
+  return false;
+}
+
+/**
+ * Door state machine: open while powered OR manually opened (right-click,
+ * tracked in `manual` keyed by the BOTTOM half's posKey); closes when the
+ * power is removed and the door was not manually opened. Only the bottom
+ * half drives the door; the top half's open bit is kept in sync. Returns
+ * true when a meta change was written.
+ */
+export function tickDoor(c: ComponentCtx, x: number, y: number, z: number, manual: Map<number, boolean>): boolean {
+  const id = c.world.getBlock(x, y, z);
+  if (id !== Block.OakDoor) return false;
+  const meta = c.world.getMeta(x, y, z);
+  if (isDoorTop(meta)) return false; // top half is passive
+  const open = doorPowered(c, x, y, z) || manual.get(posKey(x, y, z)) === true;
+  if (isDoorOpen(meta) === open) return false;
+  c.write(x, y, z, id, setDoorOpen(meta, open));
+  if (c.world.getBlock(x, y + 1, z) === Block.OakDoor) {
+    c.write(x, y + 1, z, Block.OakDoor, setDoorOpen(c.world.getMeta(x, y + 1, z), open));
+  }
+  return true;
 }
 
 export function tickPiston(c: ComponentCtx, x: number, y: number, z: number, states: Map<number, PistonState>, moves: PistonWrite[]): void {

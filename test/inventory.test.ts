@@ -3,9 +3,9 @@ import { Inventory, MAX_STACK, SLOT_COUNT, HOTBAR_SIZE } from '../src/player/inv
 import { Block, Item } from '../src/world/blocks';
 
 describe('inventory: basics', () => {
-  it('starts empty with 36 slots (9 hotbar + 27 main)', () => {
+  it('starts empty with 45 slots (9 hotbar + 36 main; Phase 5A expansion)', () => {
     const inv = new Inventory();
-    expect(SLOT_COUNT).toBe(36);
+    expect(SLOT_COUNT).toBe(45);
     expect(HOTBAR_SIZE).toBe(9);
     expect(MAX_STACK).toBe(64);
     for (let i = 0; i < SLOT_COUNT; i++) expect(inv.get(i)).toBeNull();

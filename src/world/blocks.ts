@@ -7,13 +7,17 @@
  *
  * META BYTE LAYOUT (0-15 stored in a single Uint8):
  *   bits 0-1  facing: 0=south(+Z) 1=west(-X) 2=north(-Z) 3=east(+X)
- *   bit  0    on/lit   (kind: onOff)
- *   bit  2    on/open  (kind: facingOnOff, door)
- *   bits 0-3  strength 0-15       (kind: strength — redstone dust, full byte)
+ *   bit  0    on/lit/primed  (kind: onOff — incl. TNT primed bit, Phase 5A)
+ *   bit  2    on/open        (kind: facingOnOff — tripwire_hook "has string")
+ *   bits 0-3  strength 0-15  (kind: strength — redstone dust, full byte)
  *   bits 2-3  delay-1 → 1..4 tick (kind: facingDelay — repeater)
  *   bit  2    mode 0=compare 1=subtract (kind: facingModeOutput — comparator)
  *   bits 3-6  output strength 0-15      (comparator, written by redstone tick)
  *   bits 4-7  output strength 0-15      (repeater, written by redstone tick)
+ *   Phase 5A:
+ *   bit  1    door top half (kind: door — bit 2 = open; closed = solid)
+ *   bit  1    daylight detector inverted mode (kind: daylight)
+ *   bits 0-4  note block pitch 0-24      (kind: note; 5B cycles it on RMB)
  *
  * Redstone 1.13 power conventions used by the Phase 2C module:
  *   - Weak power: horizontal 4 neighbors (dust on/beside, components behind)
@@ -67,6 +71,14 @@ export const Block = {
   Dropper: 34,
   Torch: 35,
   OakDoor: 36,
+  // Phase 5A (existing ids above are stable; new ones appended):
+  Hopper: 37,
+  DaylightDetector: 38,
+  Tnt: 39,
+  NoteBlock: 40,
+  Rail: 41,
+  PoweredRail: 42,
+  Tripwire: 43, // the string line block (non-solid, thin render)
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -81,7 +93,9 @@ export type MetaSpec =
   | { kind: 'strength' }
   | { kind: 'facingDelay' }
   | { kind: 'facingModeOutput' }
-  | { kind: 'door' };
+  | { kind: 'door' }
+  | { kind: 'daylight' }
+  | { kind: 'note' };
 
 export const Facing = { South: 0, West: 1, North: 2, East: 3 } as const;
 
@@ -147,11 +161,62 @@ export function setRepeaterOut(meta: number, strength: number): number {
   return (meta & 0x0f) | ((strength & 0x0f) << 4);
 }
 
+// --- Door meta (Phase 5A, design.md §8.4) ---------------------------------
+// bit 1 = top half, bit 2 = open (shared with the facingOnOff "on" bit).
+// A door is SOLID while closed (both halves form the 1×2 AABB); open =
+// non-solid. See `isSolidBlockAt`.
+
+export const DOOR_TOP_BIT = 0x02;
+export const DOOR_OPEN_BIT = 0x04;
+
+/** bit 1 — upper door half */
+export function isDoorTop(meta: number): boolean {
+  return (meta & DOOR_TOP_BIT) !== 0;
+}
+export function setDoorTop(meta: number, top: boolean): number {
+  return top ? meta | DOOR_TOP_BIT : meta & ~DOOR_TOP_BIT;
+}
+/** bit 2 — door open */
+export function isDoorOpen(meta: number): boolean {
+  return (meta & DOOR_OPEN_BIT) !== 0;
+}
+export function setDoorOpen(meta: number, open: boolean): number {
+  return open ? meta | DOOR_OPEN_BIT : meta & ~DOOR_OPEN_BIT;
+}
+
+// --- Daylight detector meta (Phase 5A, design.md §8.1/§8.6) ----------------
+/** bit 1 — inverted mode (output = 15 − normal) */
+export function isDaylightInverted(meta: number): boolean {
+  return (meta & DOOR_TOP_BIT) !== 0;
+}
+export function setDaylightInverted(meta: number, inverted: boolean): number {
+  return inverted ? meta | DOOR_TOP_BIT : meta & ~DOOR_TOP_BIT;
+}
+
+// --- Note block meta (Phase 5A; behavior 5B) --------------------------------
+/** bits 0-4 — pitch 0-24 (1.13 note range) */
+export function getNotePitch(meta: number): number {
+  return meta & 0x1f;
+}
+export function setNotePitch(meta: number, pitch: number): number {
+  return (meta & ~0x1f) | (Math.min(24, Math.max(0, Math.round(pitch))) & 0x1f);
+}
+
 // ---------------------------------------------------------------------------
 // Shapes (local box 0..1 used by the mesher)
 // ---------------------------------------------------------------------------
 
-export type BlockShape = 'full' | 'slab' | 'half' | 'dust' | 'torch' | 'hook';
+export type BlockShape =
+  | 'full'
+  | 'slab'
+  | 'half'
+  | 'dust'
+  | 'torch'
+  | 'hook'
+  // Phase 5A:
+  | 'hopper' // small open-top box
+  | 'rail' // thin flat piece on the ground
+  | 'string'; // tripwire: thin 1/8-wide full-height line (connects cell to cell)
 
 export const SHAPE_BOXES: Record<BlockShape, { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number }> = {
   full: { x0: 0, y0: 0, z0: 0, x1: 1, y1: 1, z1: 1 },
@@ -160,6 +225,9 @@ export const SHAPE_BOXES: Record<BlockShape, { x0: number; y0: number; z0: numbe
   dust: { x0: 0.03, y0: 0, z0: 0.03, x1: 0.97, y1: 0.125, z1: 0.97 },
   torch: { x0: 0.375, y0: 0.125, z0: 0.375, x1: 0.625, y1: 0.875, z1: 0.625 },
   hook: { x0: 0.375, y0: 0.5, z0: 0.375, x1: 0.625, y1: 1.0, z1: 0.625 },
+  hopper: { x0: 0.05, y0: 0, z0: 0.05, x1: 0.95, y1: 0.95, z1: 0.95 },
+  rail: { x0: 0.03, y0: 0, z0: 0.03, x1: 0.97, y1: 0.125, z1: 0.97 },
+  string: { x0: 0.4375, y0: 0, z0: 0.4375, x1: 0.5625, y1: 1, z1: 0.5625 },
 };
 
 // ---------------------------------------------------------------------------
@@ -216,6 +284,18 @@ export const Tile = {
   DropperFront: 45,
   Torch: 46,
   OakDoor: 47,
+  // Phase 5A (appended; ComparatorOn=48 already defined above):
+  Hopper: 49,
+  DaylightDetector: 50,
+  TntSide: 51,
+  TntTop: 52,
+  TntPrimed: 53, // lit (primed) TNT — bright white
+  NoteBlock: 54,
+  Rail: 55,
+  PoweredRail: 56,
+  TripwireString: 57,
+  DoorBottom: 58,
+  DoorTop: 59,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -287,10 +367,18 @@ export const BLOCK_DEFS: BlockDef[] = [
   def(Block.StonePressurePlate, 'stone_pressure_plate', { solid: false, opaque: false, hardness: 0.0, drop: Block.StonePressurePlate, tiles: { top: Tile.PlateCobble, side: Tile.PlateCobble, bottom: Tile.PlateCobble }, meta: { kind: 'onOff' }, shape: 'slab' }),
   def(Block.WoodPressurePlate, 'wood_pressure_plate', { solid: false, opaque: false, hardness: 0.0, drop: Block.WoodPressurePlate, tiles: { top: Tile.PlateWood, side: Tile.PlateWood, bottom: Tile.PlateWood }, meta: { kind: 'onOff' }, shape: 'slab' }),
   def(Block.TripwireHook, 'tripwire_hook', { solid: false, opaque: false, hardness: 0.0, drop: Block.TripwireHook, tiles: { top: Tile.TripwireHook, side: Tile.TripwireHook, bottom: Tile.TripwireHook }, meta: { kind: 'facingOnOff' }, shape: 'hook' }),
-  def(Block.Dispenser, 'dispenser', { solid: true, opaque: true, hardness: 1.5, drop: Block.Dispenser, tiles: { top: Tile.DispenserSide, side: Tile.DispenserSide, bottom: Tile.DispenserSide }, meta: NONE, shape: 'full' }),
-  def(Block.Dropper, 'dropper', { solid: true, opaque: true, hardness: 1.5, drop: Block.Dropper, tiles: { top: Tile.DropperSide, side: Tile.DropperSide, bottom: Tile.DropperSide }, meta: NONE, shape: 'full' }),
+  def(Block.Dispenser, 'dispenser', { solid: true, opaque: true, hardness: 1.5, drop: Block.Dispenser, tiles: { top: Tile.DispenserSide, side: Tile.DispenserSide, bottom: Tile.DispenserSide }, meta: { kind: 'facing' }, shape: 'full' }),
+  def(Block.Dropper, 'dropper', { solid: true, opaque: true, hardness: 1.5, drop: Block.Dropper, tiles: { top: Tile.DropperSide, side: Tile.DropperSide, bottom: Tile.DropperSide }, meta: { kind: 'facing' }, shape: 'full' }),
   def(Block.Torch, 'torch', { solid: false, opaque: false, hardness: 0.0, drop: Block.Torch, tiles: { top: Tile.Torch, side: Tile.Torch, bottom: Tile.Torch }, meta: NONE, shape: 'torch' }),
-  def(Block.OakDoor, 'oak_door', { solid: false, opaque: false, hardness: 1.5, drop: Block.OakDoor, tiles: { top: Tile.OakDoor, side: Tile.OakDoor, bottom: Tile.OakDoor }, meta: { kind: 'door' }, shape: 'half' }),
+  def(Block.OakDoor, 'oak_door', { solid: true, opaque: false, hardness: 1.5, drop: Block.OakDoor, tiles: { top: Tile.DoorBottom, side: Tile.DoorBottom, bottom: Tile.DoorBottom }, meta: { kind: 'door' }, shape: 'full' }),
+  // --- Phase 5A (design.md §4/§8) ---
+  def(Block.Hopper, 'hopper', { solid: true, opaque: true, hardness: 1.5, drop: Block.Hopper, tiles: { top: Tile.Hopper, side: Tile.Hopper, bottom: Tile.Hopper }, meta: { kind: 'facing' }, shape: 'hopper' }),
+  def(Block.DaylightDetector, 'daylight_detector', { solid: true, opaque: true, hardness: 0.5, drop: Block.DaylightDetector, tiles: { top: Tile.DaylightDetector, side: Tile.DaylightDetector, bottom: Tile.DaylightDetector }, meta: { kind: 'daylight' }, shape: 'slab' }),
+  def(Block.Tnt, 'tnt', { solid: true, opaque: true, hardness: 0.0, drop: Block.Tnt, tiles: { top: Tile.TntTop, side: Tile.TntSide, bottom: Tile.TntTop }, litTiles: { top: Tile.TntPrimed, side: Tile.TntPrimed, bottom: Tile.TntPrimed }, meta: { kind: 'onOff' }, shape: 'full' }),
+  def(Block.NoteBlock, 'note_block', { solid: true, opaque: true, hardness: 1.5, drop: Block.NoteBlock, tiles: { top: Tile.NoteBlock, side: Tile.NoteBlock, bottom: Tile.NoteBlock }, meta: { kind: 'note' }, shape: 'full' }),
+  def(Block.Rail, 'rail', { solid: false, opaque: false, hardness: 0.5, drop: Block.Rail, tiles: { top: Tile.Rail, side: Tile.Rail, bottom: Tile.Rail }, meta: NONE, shape: 'rail' }),
+  def(Block.PoweredRail, 'powered_rail', { solid: false, opaque: false, hardness: 0.5, drop: Block.PoweredRail, tiles: { top: Tile.PoweredRail, side: Tile.PoweredRail, bottom: Tile.PoweredRail }, meta: NONE, shape: 'rail' }),
+  def(Block.Tripwire, 'tripwire', { solid: false, opaque: false, hardness: 0.0, drop: 0, tiles: { top: Tile.TripwireString, side: Tile.TripwireString, bottom: Tile.TripwireString }, meta: NONE, shape: 'string' }),
 ];
 
 const BLOCKS: Record<number, BlockDef> = {};
@@ -300,6 +388,16 @@ export function getBlockDef(id: number): BlockDef {
   return BLOCKS[id] ?? BLOCKS[AIR];
 }
 export function isSolidBlock(id: number): boolean {
+  return getBlockDef(id).solid;
+}
+/**
+ * Meta-aware solidity (Phase 5A): the oak door is solid only while CLOSED
+ * (bit 2 of its meta unset); every other block uses its static def.
+ * Physics (src/player/physics.ts) consults this so a closed door blocks the
+ * player and an open door does not.
+ */
+export function isSolidBlockAt(id: number, meta: number): boolean {
+  if (id === Block.OakDoor) return !isDoorOpen(meta);
   return getBlockDef(id).solid;
 }
 export function isOpaqueBlock(id: number): boolean {
@@ -340,13 +438,16 @@ export const Item = {
   StoneSword: 133,
   StoneShovel: 134,
   StoneHoe: 135,
+  TripwireString: 136, // Phase 5A: string item for connecting tripwire hooks
 } as const;
 
 const ITEMS: Record<number, ItemDef> = {};
 
 // Every placeable block has a matching item with the same id.
+// Phase 5A: the tripwire STRING block has no placeable item — it is created
+// by connecting two hooks with the `tripwire` item (design.md §8.7).
 for (const b of BLOCK_DEFS) {
-  if (b.id === AIR) continue;
+  if (b.id === AIR || b.id === Block.Tripwire) continue;
   ITEMS[b.id] = { id: b.id, name: b.name, kind: 'block', blockId: b.id };
 }
 
@@ -358,6 +459,9 @@ ITEMS[Item.StoneAxe] = { id: Item.StoneAxe, name: 'stone_axe', kind: 'tool', too
 ITEMS[Item.StoneSword] = { id: Item.StoneSword, name: 'stone_sword', kind: 'tool', tool: { type: 'sword', speed: 3, durability: 131 } };
 ITEMS[Item.StoneShovel] = { id: Item.StoneShovel, name: 'stone_shovel', kind: 'tool', tool: { type: 'shovel', speed: 4, durability: 131 } };
 ITEMS[Item.StoneHoe] = { id: Item.StoneHoe, name: 'stone_hoe', kind: 'tool', tool: { type: 'hoe', speed: 4, durability: 131 } };
+// Phase 5A: the tripwire string is NOT a placeable block — it is used by
+// right-clicking a tripwire hook to connect it to another hook (§8.7).
+ITEMS[Item.TripwireString] = { id: Item.TripwireString, name: 'tripwire', kind: 'material' };
 
 export function getItemDef(id: number): ItemDef | null {
   return ITEMS[id] ?? null;

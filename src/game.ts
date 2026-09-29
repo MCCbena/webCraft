@@ -22,6 +22,7 @@ import { GameLoop, TICK_DT } from './engine/loop';
 import { Input } from './engine/input';
 import { World, DEFAULT_SEED } from './world/world';
 import { createTerrainGenerator } from './world/terrain';
+import { WorldClock } from './world/time';
 import { Player } from './player/player';
 import { stepPlayer, GRAVITY } from './player/physics';
 import { Hud } from './ui/hud';
@@ -30,6 +31,7 @@ import {
   WATER,
   Block,
   Item,
+  Facing,
   getBlockDef,
   getDelay,
   getMode,
@@ -39,6 +41,10 @@ import {
   itemBlockId,
   blockName,
   getItemDef,
+  DOOR_TOP_BIT,
+  isDoorTop,
+  setDaylightInverted,
+  isDaylightInverted,
   setDelay,
   setMode,
   setOn,
@@ -177,6 +183,8 @@ export class Game {
   readonly debug: DebugPanel;
   readonly mineBar: MineBar;
   readonly redstone = new Redstone();
+  /** Phase 5A: world day/night clock (24000 ticks/day, starts at 1000). */
+  readonly clock = new WorldClock();
   selectedSlot = 0;
   fps = 60;
   ready = false;
@@ -321,6 +329,7 @@ export class Game {
 
   /** Fixed 20 TPS simulation tick. */
   tick(): void {
+    this.clock.tick(); // Phase 5A: advance the day/night cycle
     const p = this.player;
     const jump = this.input.isDown('Space');
     const input = {
@@ -342,7 +351,8 @@ export class Game {
       // vertical velocity this tick is exactly flyVel.
       p.vy = this.flyVel + GRAVITY * TICK_DT;
     }
-    stepPlayer(p, input, (x, y, z) => this.world.getBlock(x, y, z), TICK_DT);
+    // Phase 5A: meta-aware block probe (closed oak doors block the player).
+    stepPlayer(p, input, (x, y, z) => ({ id: this.world.getBlock(x, y, z), meta: this.world.getMeta(x, y, z) }), TICK_DT);
     if (this.modes.isFlying) p.vy = this.flyVel;
     this.tickEntity(jump, wasOnGround);
     this.tickRedstone();
@@ -398,8 +408,10 @@ export class Game {
 
   /**
    * Phase 2C (redstone, 20 TPS, synchronous): drives the redstone network +
-   * component tick. `entityAbove` reports the player AABB overlap for
-   * pressure plates; player position bounds the active-redstone region.
+   * component tick. `entityAbove` reports the player AABB overlap (pressure
+   * plates + tripwire tripping). Phase 5A: the active region is the FULL
+   * world (no player bound); `worldTime` drives the daylight detector and
+   * `hasItems` is the 5B container hook (no content system in 5A → false).
    */
   tickRedstone(): void {
     const p = this.player;
@@ -407,6 +419,9 @@ export class Game {
       playerX: p.x,
       playerY: p.y,
       playerZ: p.z,
+      worldTime: this.clock.time,
+      // 5B contract: wire the real container item system here.
+      hasItems: () => false,
       entityAbove: (x, y, z) =>
         Player.boxesIntersect(p.getAABB(), { minX: x, minY: y, minZ: z, maxX: x + 1, maxY: y + 1, maxZ: z + 1 }),
     };
@@ -438,6 +453,7 @@ export class Game {
     this.tickMining(dt);
     this.refreshHud();
 
+    this.renderer.updateSky(this.clock.time); // Phase 5A: day/night sky + fog
     this.renderer.update(this.player);
     this.renderer.render(this.player);
 
@@ -536,6 +552,14 @@ export class Game {
   /** Break a block, add its drop item to the inventory, play SFX. */
   private breakBlock(x: number, y: number, z: number, id: number): void {
     const def = getBlockDef(id);
+    if (id === Block.OakDoor) {
+      // 1.13: a door is one 2-block entity — breaking either half removes
+      // both (Phase 5A). Read the meta BEFORE clearing.
+      const otherY = isDoorTop(this.world.getMeta(x, y, z)) ? y - 1 : y + 1;
+      if (this.world.getBlock(x, otherY, z) === Block.OakDoor) {
+        this.setBlock(x, otherY, z, AIR);
+      }
+    }
     this.setBlock(x, y, z, AIR);
     if (def.drop !== 0) this.inventory.addItem(def.drop, 1);
     this.sfx.play('break');
@@ -567,8 +591,10 @@ export class Game {
   }
 
   /**
-   * Right-click component interactions (Phase 2C): lever toggle, button
-   * press, repeater delay cycle (1→2→3→4→1), comparator mode toggle.
+   * Right-click component interactions (Phase 2C + 5A): lever toggle,
+   * button press, repeater delay cycle (1→2→3→4→1), comparator mode toggle,
+   * door open/close toggle (5A), tripwire hook string connection while
+   * holding the string item (5A), daylight detector inversion toggle (5A).
    * Returns true when the target was interacted with (no placement).
    */
   private interactWith(hit: RayHit): boolean {
@@ -588,6 +614,27 @@ export class Game {
       case Block.Comparator:
         this.setBlock(hit.x, hit.y, hit.z, id, setMode(meta, 1 - getMode(meta)));
         return true;
+      case Block.OakDoor:
+        this.redstone.toggleDoor(this.world, hit.x, hit.y, hit.z);
+        return true;
+      case Block.DaylightDetector:
+        this.setBlock(hit.x, hit.y, hit.z, id, setDaylightInverted(meta, !isDaylightInverted(meta)));
+        return true;
+      case Block.TripwireHook: {
+        const stack = this.inventory.get(this.selectedSlot);
+        if (stack && stack.id === Item.TripwireString) {
+          const d = this.eyeDir();
+          const ok = this.redstone.tryConnectTripwire(
+            this.world, hit.x, hit.y, hit.z,
+            this.player.x, this.player.eyeY, this.player.z,
+            d.dx, d.dy, d.dz,
+          );
+          if (ok && !this.modes.isCreative) this.inventory.removeItem(this.selectedSlot, 1);
+          this.refreshHud();
+          return true;
+        }
+        return false;
+      }
       default:
         return false;
     }
@@ -597,6 +644,9 @@ export class Game {
    * Right-click place of the currently selected block item (the raycast hit
    * is passed in from onRightClick — Phase 4: no duplicate raycast). Facing
    * blocks (Phase 2C) store a facing meta snapped from the player yaw.
+   * Phase 5A: the oak door places BOTH halves (bottom + top) as one item;
+   * hoppers/dispensers/droppers get a yaw facing; tripwire hooks face their
+   * support block (the hit block).
    */
   private placeTarget(hit: RayHit): void {
     const px = hit.x + hit.nx;
@@ -607,23 +657,51 @@ export class Game {
     const bid = itemBlockId(stack.id);
     const cur = this.world.getBlock(px, py, pz);
     if (cur !== AIR && cur !== WATER) return;
+    // --- Phase 5A: door places both halves (bottom meta 0, top meta top-bit) ---
+    if (bid === Block.OakDoor) {
+      const topCur = this.world.getBlock(px, py + 1, pz);
+      if (topCur !== AIR && topCur !== WATER) return;
+      const pabb = this.player.getAABB();
+      for (const dy of [0, 1]) {
+        const box = { minX: px, minY: py + dy, minZ: pz, maxX: px + 1, maxY: py + dy + 1, maxZ: pz + 1 };
+        if (Player.boxesIntersect(pabb, box)) return; // closed door is solid
+      }
+      this.setBlock(px, py, pz, bid, 0); // bottom: closed, not top
+      this.setBlock(px, py + 1, pz, bid, DOOR_TOP_BIT); // top half
+      if (!this.modes.isCreative) this.inventory.removeItem(this.selectedSlot, 1);
+      this.refreshHud();
+      return;
+    }
     // never place a solid block into the player's AABB
     if (isSolidBlock(bid)) {
       const box = { minX: px, minY: py, minZ: pz, maxX: px + 1, maxY: py + 1, maxZ: pz + 1 };
       if (Player.boxesIntersect(this.player.getAABB(), box)) return;
     }
     // facing meta for facing blocks (piston, sticky_piston, observer,
-    // repeater, comparator); redstone torch stores its on-state (its meta
-    // is onOff — a facing would clobber the on bit; see memory.md 2C notes).
+    // repeater, comparator; Phase 5A: hopper, dispenser, dropper); redstone
+    // torch stores its on-state (its meta is onOff — a facing would clobber
+    // the on bit; see memory.md 2C notes). Tripwire hooks face their support
+    // block (the opposite of the placement face normal).
     let meta = 0;
     if (
       bid === Block.Piston ||
       bid === Block.StickyPiston ||
       bid === Block.Observer ||
       bid === Block.Repeater ||
-      bid === Block.Comparator
+      bid === Block.Comparator ||
+      bid === Block.Hopper ||
+      bid === Block.Dispenser ||
+      bid === Block.Dropper
     ) {
       meta = facingFromYaw(this.player.yaw);
+    } else if (bid === Block.TripwireHook) {
+      const sx = -hit.nx; // support direction = toward the hit block
+      const sz = -hit.nz;
+      if (sz === 1) meta = Facing.South;
+      else if (sx === -1) meta = Facing.West;
+      else if (sz === -1) meta = Facing.North;
+      else if (sx === 1) meta = Facing.East;
+      else meta = Facing.South; // vertical placement: default
     } else if (bid === Block.RedstoneTorch) {
       meta = 1; // placed lit
     }
@@ -702,10 +780,13 @@ export class Game {
 
   // --- world edits -------------------------------------------------------------
 
-  /** Set a block and mark this chunk (plus neighbors on borders) for remesh. */
+  /**
+   * Set a block (Phase 5A: routed through Redstone.worldEdit so the
+   * redstone registry and tripwire strings stay in sync with every player
+   * world edit — mining a hook or placing a block on a string clears it).
+   */
   setBlock(x: number, y: number, z: number, id: number, meta = 0): void {
-    this.world.setBlock(x, y, z, id, meta);
-    this.world.markDirtyAround(x, y, z); // shared helper (Phase 4 DRY)
+    this.redstone.worldEdit(this.world, x, y, z, id, meta);
   }
 
   // --- HUD ----------------------------------------------------------------------

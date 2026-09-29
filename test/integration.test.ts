@@ -19,7 +19,7 @@ describe('Phase 1 pipeline (headless)', () => {
     expect(spawn.y).toBeGreaterThan(0);
     const p = new Player(spawn.x, spawn.y, spawn.z);
     for (let i = 0; i < 1000; i++) {
-      stepPlayer(p, emptyInput(), (x, y, z) => w.getBlock(x, y, z), 0.05);
+      stepPlayer(p, emptyInput(), (x, y, z) => ({ id: w.getBlock(x, y, z), meta: w.getMeta(x, y, z) }), 0.05);
     }
     expect(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)).toBe(true);
     expect(p.onGround).toBe(true);
@@ -73,7 +73,10 @@ describe('fall damage (game tick order)', () => {
         }
       }
     });
-    const getBlock = (x: number, y: number, z: number): number => w.getBlock(x, y, z);
+    const getBlock = (x: number, y: number, z: number): { id: number; meta: number } => ({
+      id: w.getBlock(x, y, z),
+      meta: w.getMeta(x, y, z),
+    });
     const p = new Player(0.5, 32, 0.5); // ~21-block fall to y=11
     const tracker = new FallTracker();
     const vitals = new Vitals(); // 20 HP

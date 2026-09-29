@@ -12,7 +12,21 @@
  * - Only the chunk's non-air vertical span (minY..maxY ±1) is scanned.
  */
 
-import { AIR, WATER, SHAPE_BOXES, getBlockDef, isOn, isSideOn, getStrength, getOutput, getRepeaterOut } from './blocks';
+import {
+  AIR,
+  Block,
+  WATER,
+  SHAPE_BOXES,
+  Tile,
+  getBlockDef,
+  isOn,
+  isSideOn,
+  isDoorTop,
+  isDoorOpen,
+  getStrength,
+  getOutput,
+  getRepeaterOut,
+} from './blocks';
 import type { BlockDef } from './blocks';
 import { Chunk, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z, chunkIndex } from './chunk';
 // Atlas grid constants live in engine/atlas.ts (single source of truth —
@@ -79,7 +93,43 @@ export function isPowered(id: number, meta: number): boolean {
   if (kind === 'strength') return getStrength(meta) > 0;
   if (kind === 'facingDelay') return getRepeaterOut(meta) > 0;
   if (kind === 'facingModeOutput') return getOutput(meta) > 0;
+  // Phase 5A: 'daylight' (inverted bit) and 'note' (pitch) carry no lit state.
   return false;
+}
+
+type Box = (typeof SHAPE_BOXES)['full'];
+
+/**
+ * Phase 5A: mesh box for a block, meta-aware.
+ *  - OakDoor: closed → full-block-width panel for the proper half
+ *    (bottom: y 0..0.5, top: y 0.5..1); open → small stub on the hinge
+ *    (west) edge.
+ *  - Everything else: the block's static shape.
+ */
+export function boxFor(id: number, meta: number): Box {
+  if (id === Block.OakDoor) {
+    const top = isDoorTop(meta);
+    const y0 = top ? 0.5 : 0;
+    if (!isDoorOpen(meta)) return { x0: 0, y0, z0: 0, x1: 1, y1: y0 + 0.5, z1: 1 };
+    return { x0: 0, y0, z0: 0, x1: 0.125, y1: y0 + 0.5, z1: 1 };
+  }
+  return SHAPE_BOXES[getBlockDef(id).shape];
+}
+
+/**
+ * Phase 5A: atlas tiles for a block, meta-aware.
+ *  - OakDoor: bottom half → DoorBottom panel, top half → DoorTop panel
+ *    (the def tiles are the bottom panel; the top half swaps in its own).
+ *  - Powered/lit: litTiles (e.g. primed TNT → white). Otherwise def tiles.
+ */
+export function tilesFor(id: number, meta: number): { top: number; side: number; bottom: number } {
+  const def = getBlockDef(id);
+  let tiles = def.tiles;
+  if (id === Block.OakDoor && isDoorTop(meta)) {
+    tiles = { top: Tile.DoorTop, side: Tile.DoorTop, bottom: Tile.DoorTop };
+  }
+  if (def.litTiles && isPowered(id, meta)) tiles = def.litTiles;
+  return tiles;
 }
 
 function hash3(x: number, y: number, z: number): number {
@@ -137,8 +187,8 @@ export function buildChunkMeshData(chunk: Chunk, chunkX: number, chunkZ: number,
         const def: BlockDef = getBlockDef(id);
         const meta = chunk.metas[i];
         const target = id === WATER ? water : opaque;
-        const tiles = def.litTiles && isPowered(id, meta) ? def.litTiles : def.tiles;
-        const box = SHAPE_BOXES[def.shape];
+        const tiles = tilesFor(id, meta); // Phase 5A: meta-aware (door half, lit)
+        const box = boxFor(id, meta); // Phase 5A: meta-aware (door open/closed)
         const wx = originX + x;
         const wz = originZ + z;
         for (const face of FACES) {

@@ -13,6 +13,7 @@ import type { FaceData } from '../world/mesher';
 import { World, WORLD_CHUNKS_Z } from '../world/world';
 import { CHUNK_SIZE_X, CHUNK_SIZE_Z } from '../world/chunk';
 import type { Player } from '../player/player';
+import { sunElevation } from '../world/time';
 import { paintAtlas, ATLAS_SIZE } from './atlas';
 
 export const RENDER_DISTANCE = 3; // ±3 chunks (7x7 = 49 chunks)
@@ -63,6 +64,12 @@ export class Renderer {
   /** Pending (re)mesh work: chunk keys, processed nearest-first, budgeted. */
   private readonly meshQueue: number[] = [];
   private readonly queued = new Set<number>();
+  /** Phase 5A: day/night sky+fog lerp (design.md §8.6). */
+  private readonly ambient: THREE.AmbientLight;
+  private readonly sun: THREE.DirectionalLight;
+  private readonly skyDay = new THREE.Color(0x87ceeb); // light blue
+  private readonly skyNight = new THREE.Color(0x0b0d1a); // dark
+  private readonly skyColor = new THREE.Color(0x87ceeb);
 
   constructor(canvas: HTMLCanvasElement, world: World) {
     this.world = world;
@@ -76,10 +83,10 @@ export class Renderer {
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.1, 400);
     this.camera.rotation.order = 'YXZ';
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-    sun.position.set(120, 220, 80);
-    this.scene.add(ambient, sun, this.group);
+    this.ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    this.sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    this.sun.position.set(120, 220, 80);
+    this.scene.add(this.ambient, this.sun, this.group);
 
     const atlas = createAtlasTexture();
     this.opaqueMat = new THREE.MeshLambertMaterial({ map: atlas, vertexColors: true });
@@ -232,6 +239,21 @@ export class Renderer {
     this.camera.rotation.y = player.yaw;
     this.camera.rotation.x = player.pitch;
     this.three.render(this.scene, this.camera);
+  }
+
+  /**
+   * Phase 5A (design.md §8.6): lerp sky background + fog color between day
+   * (light blue) and night (dark) with the sun elevation, plus a subtle
+   * light-intensity fade. No sun mesh — color only. Called once per frame
+   * with the current world time (ticks).
+   */
+  updateSky(time: number): void {
+    const f = Math.max(0, Math.min(1, 0.5 + 0.5 * sunElevation(time)));
+    this.skyColor.copy(this.skyNight).lerp(this.skyDay, f);
+    (this.scene.background as THREE.Color).copy(this.skyColor);
+    (this.scene.fog as THREE.Fog).color.copy(this.skyColor);
+    this.ambient.intensity = 0.25 + 0.35 * f;
+    this.sun.intensity = 0.15 + 1.05 * f;
   }
 
   get meshedChunkCount(): number {

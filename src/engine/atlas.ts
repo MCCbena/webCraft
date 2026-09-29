@@ -199,4 +199,92 @@ export function paintAtlas(ctx: CanvasRenderingContext2D): void {
   const od = tileOrigin(Tile.OakDoor);
   ctx.strokeStyle = 'rgba(90,68,38,0.8)';
   ctx.strokeRect(od[0] + 1.5, od[1] + 1.5, 13, 13);
+
+  // --- Phase 5A: hopper, daylight detector, TNT, note, rails, string, door ---
+  // hopper: iron box with a dark open mouth
+  paintNoise(ctx, Tile.Hopper, [140, 140, 145], 12);
+  const hp = tileOrigin(Tile.Hopper);
+  ctx.fillStyle = 'rgb(50,50,55)';
+  ctx.fillRect(hp[0] + 3, hp[1] + 3, 10, 10);
+  ctx.fillStyle = 'rgb(90,90,95)';
+  ctx.fillRect(hp[0] + 3, hp[1] + 3, 10, 2);
+  // daylight detector: dark slate slab with a 4x4 dot grid
+  paintNoise(ctx, Tile.DaylightDetector, [90, 95, 100], 8);
+  const dd = tileOrigin(Tile.DaylightDetector);
+  ctx.fillStyle = 'rgb(210,215,220)';
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) ctx.fillRect(dd[0] + 2 + x * 3, dd[1] + 3 + y * 3, 2, 2);
+  }
+  // TNT: red body with white band + "TNT" top
+  paintNoise(ctx, Tile.TntSide, [186, 58, 44], 14);
+  const tn = tileOrigin(Tile.TntSide);
+  ctx.fillStyle = 'rgb(235,225,205)';
+  ctx.fillRect(tn[0], tn[1] + 5, 16, 6);
+  ctx.fillStyle = 'rgb(50,35,30)';
+  ctx.fillRect(tn[0] + 2, tn[1] + 6, 2, 4);
+  ctx.fillRect(tn[0] + 7, tn[1] + 6, 2, 4);
+  ctx.fillRect(tn[0] + 12, tn[1] + 6, 2, 4);
+  paintNoise(ctx, Tile.TntTop, [200, 70, 55], 14);
+  const tt = tileOrigin(Tile.TntTop);
+  ctx.fillStyle = 'rgba(120,30,25,0.9)';
+  ctx.strokeRect(tt[0] + 1.5, tt[1] + 1.5, 13, 13);
+  // primed TNT: bright white (litTiles, meta primed bit)
+  paintNoise(ctx, Tile.TntPrimed, [245, 245, 245], 10);
+  const tp = tileOrigin(Tile.TntPrimed);
+  ctx.fillStyle = 'rgb(255,180,80)';
+  ctx.fillRect(tp[0] + 3, tp[1] + 3, 3, 3);
+  ctx.fillRect(tp[0] + 10, tp[1] + 8, 3, 3);
+  // note block: planks with a round cow-horn
+  paintNoise(ctx, Tile.NoteBlock, [162, 130, 78], 10);
+  const nb = tileOrigin(Tile.NoteBlock);
+  ctx.fillStyle = 'rgba(90,68,38,0.7)';
+  ctx.fillRect(nb[0], nb[1] + 11, 16, 1);
+  ctx.fillStyle = 'rgb(120,95,60)';
+  ctx.beginPath();
+  ctx.arc(nb[0] + 8, nb[1] + 7, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgb(70,52,30)';
+  ctx.beginPath();
+  ctx.arc(nb[0] + 8, nb[1] + 7, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  // rails: dark base + two crossing iron rails (no direction meta in 5A)
+  paintNoise(ctx, Tile.Rail, [60, 60, 65], 8);
+  const rl = tileOrigin(Tile.Rail);
+  ctx.fillStyle = 'rgb(170,170,175)';
+  for (let i = 0; i < 16; i++) {
+    ctx.fillRect(rl[0] + i, rl[1] + i, 1, 1);
+    ctx.fillRect(rl[0] + 15 - i, rl[1] + i, 1, 1);
+  }
+  ctx.fillStyle = 'rgb(95,95,100)';
+  for (let i = 2; i < 16; i += 4) {
+    ctx.fillRect(rl[0] + i, rl[1] + 4, 2, 2);
+    ctx.fillRect(rl[0] + 10, rl[1] + 10, 2, 2);
+  }
+  // powered rail: gold crossing on dark base
+  paintNoise(ctx, Tile.PoweredRail, [60, 55, 40], 8);
+  const pr = tileOrigin(Tile.PoweredRail);
+  ctx.fillStyle = 'rgb(235,200,80)';
+  for (let i = 0; i < 16; i++) {
+    ctx.fillRect(pr[0] + i, pr[1] + i, 1, 1);
+    ctx.fillRect(pr[0] + 15 - i, pr[1] + i, 1, 1);
+  }
+  // tripwire string: thin vertical line on a dark (near-air) background
+  paintNoise(ctx, Tile.TripwireString, [40, 38, 35], 6);
+  const st = tileOrigin(Tile.TripwireString);
+  ctx.fillStyle = 'rgb(150,130,95)';
+  ctx.fillRect(st[0] + 7, st[1], 2, 16);
+  // door panels (bottom / top halves)
+  paintNoise(ctx, Tile.DoorBottom, [150, 115, 65], 10);
+  const db = tileOrigin(Tile.DoorBottom);
+  ctx.strokeStyle = 'rgba(85,60,32,0.85)';
+  ctx.strokeRect(db[0] + 1.5, db[1] + 1.5, 13, 13);
+  ctx.strokeRect(db[0] + 3.5, db[1] + 3.5, 9, 5);
+  ctx.fillStyle = 'rgb(210,200,170)';
+  ctx.fillRect(db[0] + 11, db[1] + 9, 2, 2);
+  paintNoise(ctx, Tile.DoorTop, [150, 115, 65], 10);
+  const dt2 = tileOrigin(Tile.DoorTop);
+  ctx.strokeStyle = 'rgba(85,60,32,0.85)';
+  ctx.strokeRect(dt2[0] + 1.5, dt2[1] + 1.5, 13, 13);
+  ctx.strokeRect(dt2[0] + 3.5, dt2[1] + 3.5, 9, 5);
+  ctx.strokeRect(dt2[0] + 3.5, dt2[1] + 10, 9, 3);
 }

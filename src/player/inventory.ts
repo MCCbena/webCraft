@@ -2,13 +2,15 @@
  * WebCraft — Player inventory (Phase 2B, [modes]).
  * Pure TS, no DOM — fully unit-testable.
  *
- * 36 slots: 0-8 hotbar, 9-35 main storage.
+ * 45 slots: 0-8 hotbar, 9-44 main storage.
+ * (Phase 5A: expanded from 36 — the full 1.13 block set adds 6 placeable
+ * blocks, 42 total, which no longer fit in 36 slots.)
  * Stacks max MAX_STACK (64). Item ids come from src/world/blocks.ts
  * (block items share the block id; foods/tools use the Item ids).
  */
 
 export const MAX_STACK = 64;
-export const SLOT_COUNT = 36;
+export const SLOT_COUNT = 45;
 export const HOTBAR_SIZE = 9;
 
 export interface ItemStack {

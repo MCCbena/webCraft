@@ -3,6 +3,7 @@ import {
   AIR,
   Block,
   BLOCK_DEFS,
+  Tile,
   Item,
   ALL_BLOCK_IDS,
   ALL_ITEM_IDS,
@@ -10,6 +11,7 @@ import {
   getItemDef,
   isPlaceable,
   isSolidBlock,
+  isSolidBlockAt,
   isOpaqueBlock,
   getFacing,
   setFacing,
@@ -23,6 +25,14 @@ import {
   setStrength,
   isOn,
   setOn,
+  isDoorTop,
+  setDoorTop,
+  isDoorOpen,
+  setDoorOpen,
+  isDaylightInverted,
+  setDaylightInverted,
+  getNotePitch,
+  setNotePitch,
 } from '../src/world/blocks';
 
 /** Every block name required by design.md §4. */
@@ -34,10 +44,12 @@ const REQUIRED_BLOCKS = [
   'piston', 'sticky_piston', 'observer', 'lever', 'stone_button', 'wood_button',
   'stone_pressure_plate', 'wood_pressure_plate', 'tripwire_hook', 'dispenser', 'dropper',
   'torch', 'oak_door',
+  // Phase 5A (design.md §4 "完全版"):
+  'hopper', 'daylight_detector', 'tnt', 'note_block', 'rail', 'powered_rail', 'tripwire',
 ];
 
 /** Every item required by design.md §4. */
-const REQUIRED_ITEMS = ['wheat', 'bread', 'apple', 'stone_pickaxe', 'stone_axe', 'stone_sword', 'stone_shovel', 'stone_hoe'];
+const REQUIRED_ITEMS = ['wheat', 'bread', 'apple', 'stone_pickaxe', 'stone_axe', 'stone_sword', 'stone_shovel', 'stone_hoe', 'tripwire'];
 
 describe('block definition completeness (design.md §4)', () => {
   it('has every required block', () => {
@@ -152,6 +164,110 @@ describe('meta helpers', () => {
     expect(isOn(setOn(0, true))).toBe(true);
     expect(isOn(setOn(0b1110, true))).toBe(true);
     expect(isOn(setOn(0b1111, false))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5A: new block/item definitions
+// ---------------------------------------------------------------------------
+
+describe('Phase 5A block definitions (design.md §4/§8)', () => {
+  it('all new 5A block ids exist with sane physical properties', () => {
+    const expectProps = (id: number, name: string, solid: boolean, opaque: boolean, drop = id) => {
+      const d = getBlockDef(id);
+      expect(d.name, name).toBe(name);
+      expect(d.id, `${name} id`).toBe(id);
+      expect(d.solid, `${name} solid`).toBe(solid);
+      expect(d.opaque, `${name} opaque`).toBe(opaque);
+      expect(d.hardness, `${name} hardness`).toBeGreaterThanOrEqual(0);
+      expect(d.drop, `${name} drop`).toBe(drop);
+    };
+    expectProps(Block.Hopper, 'hopper', true, true);
+    expectProps(Block.DaylightDetector, 'daylight_detector', true, true);
+    expectProps(Block.Tnt, 'tnt', true, true);
+    expectProps(Block.NoteBlock, 'note_block', true, true);
+    expectProps(Block.Rail, 'rail', false, false);
+    expectProps(Block.PoweredRail, 'powered_rail', false, false);
+    // the string drops nothing (1.13: the string is recreated by hooks)
+    expectProps(Block.Tripwire, 'tripwire', false, false, 0);
+  });
+
+  it('new 5A meta specs are correct', () => {
+    expect(getBlockDef(Block.Hopper).meta.kind).toBe('facing');
+    expect(getBlockDef(Block.DaylightDetector).meta.kind).toBe('daylight');
+    expect(getBlockDef(Block.Tnt).meta.kind).toBe('onOff'); // primed bit
+    expect(getBlockDef(Block.NoteBlock).meta.kind).toBe('note');
+    expect(getBlockDef(Block.Rail).meta.kind).toBe('none');
+    expect(getBlockDef(Block.PoweredRail).meta.kind).toBe('none');
+    expect(getBlockDef(Block.Tripwire).meta.kind).toBe('none');
+    expect(getBlockDef(Block.Dispenser).meta.kind).toBe('facing'); // 5A: behind-power direction
+    expect(getBlockDef(Block.Dropper).meta.kind).toBe('facing');
+  });
+
+  it('all 5A atlas tiles are within the 16x16 atlas range', () => {
+    const tiles = [
+      Tile.Hopper, Tile.DaylightDetector, Tile.TntSide, Tile.TntTop, Tile.TntPrimed,
+      Tile.NoteBlock, Tile.Rail, Tile.PoweredRail, Tile.TripwireString, Tile.DoorBottom, Tile.DoorTop,
+    ];
+    for (const t of tiles) expect(t, `tile ${t}`).toBeGreaterThanOrEqual(0);
+    for (const t of tiles) expect(t, `tile ${t}`).toBeLessThan(256);
+    // no duplicate tile indices among the 5A set
+    expect(new Set(tiles).size).toBe(tiles.length);
+  });
+
+  it('TNT primed state selects the lit (white) tiles', () => {
+    const d = getBlockDef(Block.Tnt);
+    expect(d.litTiles).toBeDefined();
+    expect(d.litTiles?.side).toBe(Tile.TntPrimed);
+    expect(d.tiles.side).toBe(Tile.TntSide);
+  });
+
+  it('door meta: top/open bits are independent and round-trip', () => {
+    let m = 0;
+    expect(isDoorTop(m)).toBe(false);
+    expect(isDoorOpen(m)).toBe(false);
+    m = setDoorTop(m, true);
+    expect(isDoorTop(m)).toBe(true);
+    expect(isDoorOpen(m)).toBe(false);
+    m = setDoorOpen(m, true);
+    expect(isDoorTop(m)).toBe(true); // open bit does not clobber the top bit
+    expect(isDoorOpen(m)).toBe(true);
+    m = setDoorOpen(m, false);
+    expect(isDoorTop(m)).toBe(true);
+    expect(isDoorOpen(m)).toBe(false);
+  });
+
+  it('daylight inverted + note pitch helpers round-trip', () => {
+    expect(isDaylightInverted(0)).toBe(false);
+    expect(isDaylightInverted(setDaylightInverted(0, true))).toBe(true);
+    expect(setDaylightInverted(0, true)).toBe(0x02);
+    for (const p of [0, 7, 12, 24]) {
+      expect(getNotePitch(setNotePitch(0, p))).toBe(p);
+    }
+    expect(getNotePitch(setNotePitch(0, 99))).toBe(24); // clamped to 0-24
+    expect(getNotePitch(setNotePitch(0, -3))).toBe(0);
+  });
+
+  it('meta-aware solidity: closed door solid, open door not (all other blocks unchanged)', () => {
+    expect(isSolidBlockAt(Block.OakDoor, 0)).toBe(true); // closed bottom
+    expect(isSolidBlockAt(Block.OakDoor, 0x02)).toBe(true); // closed top
+    expect(isSolidBlockAt(Block.OakDoor, 0x04)).toBe(false); // open bottom
+    expect(isSolidBlockAt(Block.OakDoor, 0x06)).toBe(false); // open top
+    // non-door blocks ignore the meta
+    expect(isSolidBlockAt(Block.Stone, 0xff)).toBe(isSolidBlock(Block.Stone));
+    expect(isSolidBlockAt(Block.Water, 0xff)).toBe(false);
+  });
+
+  it('the tripwire STRING is an item but not a placeable block item', () => {
+    expect(getItemDef(Item.TripwireString)?.name).toBe('tripwire');
+    expect(getItemDef(Item.TripwireString)?.kind).toBe('material');
+    expect(isPlaceable(Item.TripwireString)).toBe(false);
+    // the tripwire block itself has no placeable item (hooks connect it)
+    expect(isPlaceable(Block.Tripwire)).toBe(false);
+    // the new 5A blocks ARE placeable
+    for (const id of [Block.Hopper, Block.DaylightDetector, Block.Tnt, Block.NoteBlock, Block.Rail, Block.PoweredRail, Block.OakDoor]) {
+      expect(isPlaceable(id), `block ${id} placeable`).toBe(true);
+    }
   });
 });
 

@@ -25,16 +25,32 @@
  * (Phase 2C notes, Phase 4b section).
  */
 
+import { Block } from '../world/blocks';
+
 /**
  * Context the game (game.ts) provides to Redstone.tick() each 20 TPS tick.
  * `entityAbove(x,y,z)` reports whether an entity AABB overlaps the block
- * space at (x,y,z) — used for pressure plates (space above the plate).
+ * space at (x,y,z) — used for pressure plates (space above the plate) and
+ * tripwire tripping (Phase 5A).
  */
 export interface RedstoneCtx {
   entityAbove(x: number, y: number, z: number): boolean;
   playerX: number;
   playerY: number;
   playerZ: number;
+  /**
+   * Phase 5A: current world time in ticks, 0..23999 (see src/world/time.ts).
+   * Drives the daylight detector output (§8.6). Optional for back-compat;
+   * defaults to 0 (night) when absent.
+   */
+  worldTime?: number;
+  /**
+   * Phase 5A contract for 5B: reports whether the container block at
+   * (x,y,z) (hopper/dropper/dispenser) currently holds items. A container
+   * with items powers the block BEHIND it (weak 15, §8.1). Default: false
+   * (5A has no content system; 5B wires the real containers here).
+   */
+  hasItems?(x: number, y: number, z: number): boolean;
 }
 
 /** Full signal strength (design.md §8.1: power sources output 15). */
@@ -54,15 +70,37 @@ export const BUTTON_TICKS_STONE = 10;
 export const BUTTON_TICKS_WOOD = 20;
 
 /**
- * Block id range of all redstone-logic blocks in blocks.ts
- * (18 = RedstoneDust .. 34 = Dropper). Used for the fast universe scan.
+ * Phase 5A: block ids that need a per-tick state machine (or a 5B one) —
+ * the sparse component registry (tick.ts) tracks exactly these. Dust is
+ * tracked in a SEPARATE set (it has no per-component state; the fixed-point
+ * sweep covers it). Pure on-demand sources (redstone_block, rails,
+ * daylight detector) are NOT registered: their output is a pure function
+ * of world state read by the power model.
+ *
+ * 5B placeholders (registered now, no 5A tick case): Tnt, NoteBlock,
+ * Hopper, Dispenser, Dropper — 5B adds their state machines.
  */
-export const REDSTONE_ID_MIN = 18;
-export const REDSTONE_ID_MAX = 34;
-
-export function isRedstoneBlock(id: number): boolean {
-  return id >= REDSTONE_ID_MIN && id <= REDSTONE_ID_MAX;
-}
+export const REDSTONE_COMPONENT_IDS: ReadonlySet<number> = new Set<number>([
+  Block.RedstoneTorch,
+  Block.RedstoneLamp,
+  Block.Repeater,
+  Block.Comparator,
+  Block.Piston,
+  Block.StickyPiston,
+  Block.Observer,
+  Block.Lever,
+  Block.StoneButton,
+  Block.WoodButton,
+  Block.StonePressurePlate,
+  Block.WoodPressurePlate,
+  Block.TripwireHook,
+  Block.Dispenser,
+  Block.Dropper,
+  Block.OakDoor,
+  Block.Hopper,
+  Block.Tnt,
+  Block.NoteBlock,
+]);
 
 // --- Facing (blocks.ts convention: 0=south +Z, 1=west -X, 2=north -Z, 3=east +X) ---
 

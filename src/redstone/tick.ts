@@ -1,48 +1,67 @@
 /**
- * WebCraft — Redstone 20 TPS tick (Phase 2C, [redstone]).
+ * WebCraft — Redstone 20 TPS tick (Phase 2C, [redstone]; Phase 5A: full-world
+ * active region + tripwires + doors + new sources).
  *
  * `Redstone.tick(world, ctx)` is called once per 20 TPS tick from
  * game.ts (Game.tickRedstone()). Synchronous, deterministic, no timers.
  *
- * Per-tick order (task spec / design.md §8.4):
- *   1. Scan the universe: redstone blocks in the player's 3×3 chunk region
- *      (bounded like Minecraft's active-redstone radius; blocks outside are
- *      not ticked while the player is far away).
- *   2. Component state machines (pistons, observers, repeaters, comparators,
- *      buttons, pressure plates) — deterministic sorted order.
- *   3. Apply resulting block changes (piston moves; component meta writes
- *      already applied via ctx.write).
- *   4. Recompute the dust network to a fixed point (capped), then re-evaluate
- *      the passive components (torch, lamp) that depend on the new dust
- *      strengths; bounded convergence rounds.
- *   5. Prune runtime state for blocks left the universe.
+ * Phase 5A — FULL-WORLD ACTIVE REGION (design.md §8.2): the player 3×3-chunk
+ * universe scan is GONE. Redstone state lives in sparse registries:
+ *  - `components`: posKey → block for every registered component id
+ *    (REDSTONE_COMPONENT_IDS), ticked every tick in sorted order;
+ *  - `dust`: posKey → block for every redstone dust (fixed-point sweep).
+ * Both are maintained incrementally: World tracks chunks whose block data
+ * changed (World.drainChangedChunks); each tick we re-scan only those
+ * chunks (budgeted) and rebuild their registry entries. A fresh world pays
+ * one full scan (spread over a few ticks); steady state pays ~nothing.
  *
- * Performance: the universe scan is a tight typed-array loop over at most
- * 9 chunks × 65536 ids (~0.5 ms). Dust/component work is proportional to
- * the number of redstone blocks in the region.
+ * Per-tick order:
+ *   1. Registry sync (changed chunks only).
+ *   2. Tripwire tripping pass (player AABB vs string cells).
+ *   3. Component state machines (pistons, observers, repeaters, comparators,
+ *      buttons, pressure plates, doors) — deterministic sorted order.
+ *   4. Apply resulting block changes (piston moves; component meta writes
+ *      already applied via ctx.write).
+ *   5. Recompute the dust network to a fixed point (capped), then re-evaluate
+ *      the passive components (torch, lamp); bounded convergence rounds.
+ *   6. Prune runtime state for blocks that no longer exist.
+ *
+ * Public game-facing API (5A):
+ *  - worldEdit(world, x, y, z, id, meta) — the ONLY world write path the
+ *    game/tests should use: applies the write, marks remesh, and maintains
+ *    tripwire strings (mined hook / solid placed on a string cell /
+ *    string cell replaced → the string is cleared).
+ *  - toggleDoor(world, x, y, z) — right-click door toggle (5A owns this).
+ *  - tryConnectTripwire(world, hook, eyePos, eyeDir) — string connection.
+ *  - primeTnt(world, x, y, z) — 5B TNT priming entry point (sets the primed
+ *    meta bit; the fuse/explosion state machine is 5B's).
+ *  - isHookTripped(x, y, z) — query the tripped-hook set.
  */
 
-import { AIR, Block, setOn } from '../world/blocks';
+import { AIR, Block, isSolidBlock, isDoorTop, isDoorOpen, setDoorOpen, setOn, setSideOn } from '../world/blocks';
 import { CHUNK_SIZE_X, CHUNK_SIZE_Z, CHUNK_VOLUME } from '../world/chunk';
+import { WORLD_CHUNKS_Z } from '../world/world';
 import type { World } from '../world/world';
 import {
   BUTTON_TICKS_STONE,
   BUTTON_TICKS_WOOD,
   DUST_MAX_ROUNDS,
-  isRedstoneBlock,
+  REDSTONE_COMPONENT_IDS,
   posKey,
   type RedstoneCtx,
   type UniverseBlock,
 } from './types';
-import { propagateDustToFixedPoint, type ObserverState } from './network';
+import { propagateDustToFixedPoint, type ObserverState, type PowerCtx } from './network';
 import {
   tickButton,
   tickDelayed,
+  tickDoor,
   tickLamp,
   tickObserver,
   tickPlate,
   tickPiston,
   tickTorch,
+  doorPowered,
   type ComponentCtx,
   type DelayedState,
   type ObserverEntry,
@@ -50,7 +69,56 @@ import {
   type PistonWrite,
 } from './components';
 
+/** Max chunks re-scanned for the registry per tick (performance bound). */
+const REGISTRY_SCAN_BUDGET = 32;
+/** Tripwire string link reach in blocks (design.md §8.7). */
+const TRIPWIRE_LINK_REACH = 40;
+
+/** Decode a posKey back to world coords (inverse of types.posKey). */
+function decodeKey(k: number): { x: number; y: number; z: number } {
+  return { x: (k >>> 16) - 128, y: (k >>> 8) & 0xff, z: (k & 0xff) - 128 };
+}
+
+/**
+ * The string cells STRICTLY BETWEEN the two hook endpoints of a valid
+ * tripwire link (horizontal same-Y line on one axis, or a straight vertical
+ * line). Returns null when the endpoints are not a valid link geometry.
+ */
+function tripwireCellsBetween(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): { x: number; y: number; z: number }[] | null {
+  if (a.y === b.y && (a.x === b.x || a.z === b.z)) {
+    const sx = Math.sign(b.x - a.x);
+    const sz = Math.sign(b.z - a.z);
+    const cells: { x: number; y: number; z: number }[] = [];
+    let x = a.x + sx;
+    let z = a.z + sz;
+    while (x !== b.x || z !== b.z) {
+      cells.push({ x, y: a.y, z });
+      x += sx;
+      z += sz;
+    }
+    return cells;
+  }
+  if (a.x === b.x && a.z === b.z) {
+    const sy = Math.sign(b.y - a.y);
+    const cells: { x: number; y: number; z: number }[] = [];
+    let y = a.y + sy;
+    while (y !== b.y) {
+      cells.push({ x: a.x, y, z: a.z });
+      y += sy;
+    }
+    return cells;
+  }
+  return null;
+}
+
 export class Redstone {
+  /** Phase 5A: sparse component registry (posKey → block). */
+  private readonly components = new Map<number, UniverseBlock>();
+  /** Phase 5A: sparse dust set (posKey → block). */
+  private readonly dust = new Map<number, UniverseBlock>();
+  /** chunk slot → registry keys owned by that chunk (for rescan cleanup). */
+  private readonly chunkReg = new Map<number, Set<number>>();
+
   /** repeater/comparator runtime delay states (position key → state) */
   private readonly repeaters = new Map<number, DelayedState>();
   private readonly comparators = new Map<number, DelayedState>();
@@ -60,10 +128,227 @@ export class Redstone {
   private readonly pistons = new Map<number, PistonState>();
   /** button: position key → remaining on ticks */
   private readonly buttons = new Map<number, number>();
+  /** door (Phase 5A): bottom-half position key → manually opened (right-click) */
+  private readonly doors = new Map<number, boolean>();
+  /** tripwire (Phase 5A): hook posKey ↔ partner hook posKey */
+  private readonly tripwireLinks = new Map<number, number>();
+  /** tripwire (Phase 5A): hooks whose string is currently tripped */
+  private trippedHooks = new Set<number>();
+
+  /** Runtime power context, rebuilt each tick from the RedstoneCtx. */
+  private power: PowerCtx = {
+    observers: { isOutputting: () => false },
+    hasItems: () => false,
+    trippedHook: () => false,
+    worldTime: 0,
+  };
 
   private readonly obsState: ObserverState = {
     isOutputting: (x, y, z) => (this.observers.get(posKey(x, y, z))?.ticks ?? 0) > 0,
   };
+
+  /** Query: is the tripwire hook at (x,y,z) currently tripped? */
+  isHookTripped(x: number, y: number, z: number): boolean {
+    return this.trippedHooks.has(posKey(x, y, z));
+  }
+
+  /**
+   * 5B contract — prime a TNT (sets the primed meta bit + remesh mark).
+   * The fuse countdown (80 ticks) and explosion are 5B's responsibility.
+   */
+  primeTnt(world: World, x: number, y: number, z: number): void {
+    if (world.getBlock(x, y, z) !== Block.Tnt) return;
+    world.setBlock(x, y, z, Block.Tnt, setOn(world.getMeta(x, y, z), true));
+    world.markDirtyAround(x, y, z);
+  }
+
+  /**
+   * The game's world-write path (Phase 5A): applies the block write, marks
+   * the remesh, and maintains tripwire strings:
+   *  - a tripwire hook is removed → its string is cleared;
+   *  - a tripwire string cell is replaced (mined, or any block placed on it,
+   *    solid or not) → the string is cleared.
+   */
+  worldEdit(world: World, x: number, y: number, z: number, id: number, meta: number): void {
+    const oldId = world.getBlock(x, y, z);
+    world.setBlock(x, y, z, id, meta);
+    world.markDirtyAround(x, y, z);
+    if (oldId === Block.TripwireHook) this.clearStringAt(world, x, y, z);
+    else if (oldId === Block.Tripwire && id !== Block.Tripwire) this.clearStringAt(world, x, y, z);
+  }
+
+  /**
+   * Right-click door toggle (Phase 5A, design.md §8.4). Works on either
+   * half. A powered door stays open (the toggle is ignored while powered);
+   * otherwise the manual-open flag flips and both halves update immediately.
+   */
+  toggleDoor(world: World, x: number, y: number, z: number): void {
+    if (world.getBlock(x, y, z) !== Block.OakDoor) return;
+    let by = y;
+    if (isDoorTop(world.getMeta(x, y, z))) by = y - 1; // top half → bottom is below
+    if (world.getBlock(x, by, z) !== Block.OakDoor) return;
+    const key = posKey(x, by, z);
+    const c: ComponentCtx = { world, power: this.power, write: (wx, wy, wz, id, m) => world.setBlock(wx, wy, wz, id, m) };
+    if (doorPowered(c, x, by, z)) return; // powered doors are locked open
+    if (isDoorOpen(world.getMeta(x, by, z))) {
+      this.doors.delete(key);
+      this.applyDoorOpen(world, x, by, z, false);
+    } else {
+      this.doors.set(key, true);
+      this.applyDoorOpen(world, x, by, z, true);
+    }
+  }
+
+  /** Set the door open state on both halves (with remesh marks). */
+  private applyDoorOpen(world: World, x: number, y: number, z: number, open: boolean): void {
+    world.setBlock(x, y, z, Block.OakDoor, setDoorOpen(world.getMeta(x, y, z), open));
+    world.markDirtyAround(x, y, z);
+    if (world.getBlock(x, y + 1, z) === Block.OakDoor) {
+      world.setBlock(x, y + 1, z, Block.OakDoor, setDoorOpen(world.getMeta(x, y + 1, z), open));
+      world.markDirtyAround(x, y + 1, z);
+    }
+  }
+
+  /**
+   * Tripwire string connection (Phase 5A, design.md §8.7): from the hook at
+   * (hx,hy,hz), raycast up to TRIPWIRE_LINK_REACH blocks along the eye
+   * direction. If the ray hits ANOTHER tripwire hook that shares the same Y
+   * (horizontal line on one axis) or the same X/Z (vertical line), and every
+   * cell in between is air/tripwire, the string is created: tripwire blocks
+   * fill the intermediate cells, the link is recorded (both directions),
+   * and both hooks get their "has string" meta bit. Returns true on success.
+   */
+  tryConnectTripwire(
+    world: World,
+    hx: number, hy: number, hz: number,
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+  ): boolean {
+    let x = Math.floor(ox);
+    let y = Math.floor(oy);
+    let z = Math.floor(oz);
+    const stepX = dx > 0 ? 1 : -1;
+    const stepY = dy > 0 ? 1 : -1;
+    const stepZ = dz > 0 ? 1 : -1;
+    const tDeltaX = dx !== 0 ? Math.abs(1 / dx) : Infinity;
+    const tDeltaY = dy !== 0 ? Math.abs(1 / dy) : Infinity;
+    const tDeltaZ = dz !== 0 ? Math.abs(1 / dz) : Infinity;
+    let tMaxX = dx !== 0 ? (dx > 0 ? x + 1 - ox : ox - x) * tDeltaX : Infinity;
+    let tMaxY = dy !== 0 ? (dy > 0 ? y + 1 - oy : oy - y) * tDeltaY : Infinity;
+    let tMaxZ = dz !== 0 ? (dz > 0 ? z + 1 - oz : oz - z) * tDeltaZ : Infinity;
+    // DDA (same stepping as game.raycast); air/tripwire are passable,
+    // anything else blocks the ray; a hook is the only possible target.
+    for (let i = 0; i < 200; i++) {
+      const id = world.getBlock(x, y, z);
+      if (id === Block.TripwireHook) {
+        if (x === hx && y === hy && z === hz) {
+          // the source hook's own cell — keep stepping
+        } else if (this.canLink(world, hx, hy, hz, x, y, z)) {
+          this.createLink(world, hx, hy, hz, x, y, z);
+          return true;
+        } else {
+          return false;
+        }
+      } else if (id !== AIR && id !== Block.Tripwire) {
+        return false; // blocked
+      }
+      if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+        if (tMaxX > TRIPWIRE_LINK_REACH) return false;
+        x += stepX;
+        tMaxX += tDeltaX;
+      } else if (tMaxY <= tMaxZ) {
+        if (tMaxY > TRIPWIRE_LINK_REACH) return false;
+        y += stepY;
+        tMaxY += tDeltaY;
+      } else {
+        if (tMaxZ > TRIPWIRE_LINK_REACH) return false;
+        z += stepZ;
+        tMaxZ += tDeltaZ;
+      }
+    }
+    return false;
+  }
+
+  /** Valid link geometry + clear intermediate cells + no existing string. */
+  private canLink(world: World, ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean {
+    const aKey = posKey(ax, ay, az);
+    const bKey = posKey(bx, by, bz);
+    if (this.tripwireLinks.has(aKey) || this.tripwireLinks.has(bKey)) return false; // one string per hook
+    const cells = tripwireCellsBetween({ x: ax, y: ay, z: az }, { x: bx, y: by, z: bz });
+    if (!cells || cells.length === 0) return false;
+    for (const c of cells) {
+      const id = world.getBlock(c.x, c.y, c.z);
+      if (id !== AIR && id !== Block.Tripwire) return false;
+    }
+    return true;
+  }
+
+  /** Create the string: fill cells, record the link, flag both hooks. */
+  private createLink(world: World, ax: number, ay: number, az: number, bx: number, by: number, bz: number): void {
+    const aKey = posKey(ax, ay, az);
+    const bKey = posKey(bx, by, bz);
+    for (const c of tripwireCellsBetween({ x: ax, y: ay, z: az }, { x: bx, y: by, z: bz })!) {
+      world.setBlock(c.x, c.y, c.z, Block.Tripwire);
+      world.markDirtyAround(c.x, c.y, c.z);
+    }
+    this.tripwireLinks.set(aKey, bKey);
+    this.tripwireLinks.set(bKey, aKey);
+    for (const h of [
+      { x: ax, y: ay, z: az },
+      { x: bx, y: by, z: bz },
+    ]) {
+      const meta = world.getMeta(h.x, h.y, h.z);
+      world.setBlock(h.x, h.y, h.z, Block.TripwireHook, setSideOn(meta, true));
+      world.markDirtyAround(h.x, h.y, h.z);
+    }
+  }
+
+  /** Clear the string that involves (x,y,z) (as endpoint or intermediate cell). */
+  private clearStringAt(world: World, x: number, y: number, z: number): void {
+    const k = posKey(x, y, z);
+    const other = this.tripwireLinks.get(k);
+    if (other !== undefined) {
+      this.clearLink(world, k, other);
+      return;
+    }
+    for (const [aKey, bKey] of this.tripwireLinks) {
+      const cells = tripwireCellsBetween(decodeKey(aKey), decodeKey(bKey));
+      if (!cells) continue;
+      if (cells.some((c) => c.x === x && c.y === y && c.z === z)) {
+        this.clearLink(world, aKey, bKey);
+        return;
+      }
+    }
+  }
+
+  /** Remove a link: clear the string cells, un-flag both hooks, drop tripped state. */
+  private clearLink(world: World, aKey: number, bKey: number): void {
+    this.tripwireLinks.delete(aKey);
+    this.tripwireLinks.delete(bKey);
+    this.trippedHooks.delete(aKey);
+    this.trippedHooks.delete(bKey);
+    const a = decodeKey(aKey);
+    const b = decodeKey(bKey);
+    const cells = tripwireCellsBetween(a, b);
+    if (cells) {
+      for (const c of cells) {
+        if (world.getBlock(c.x, c.y, c.z) === Block.Tripwire) {
+          world.setBlock(c.x, c.y, c.z, AIR);
+          world.markDirtyAround(c.x, c.y, c.z);
+        }
+      }
+    }
+    for (const h of [a, b]) {
+      if (world.getBlock(h.x, h.y, h.z) === Block.TripwireHook) {
+        world.setBlock(h.x, h.y, h.z, Block.TripwireHook, setSideOn(world.getMeta(h.x, h.y, h.z), false));
+        world.markDirtyAround(h.x, h.y, h.z);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Ticking
+  // -------------------------------------------------------------------------
 
   /**
    * Press a button (called from the game's right-click interact path).
@@ -78,24 +363,28 @@ export class Redstone {
 
   /** One 20 TPS redstone tick (see file header for the pipeline). */
   tick(world: World, ctx: RedstoneCtx): void {
-    // (1) Universe scan — player's 3×3 chunk region.
-    const universe = this.scanUniverse(world, ctx);
-    const keys = new Set<number>();
-    const positions: UniverseBlock[] = [];
-    for (const u of universe.values()) {
-      keys.add(posKey(u.x, u.y, u.z));
-      positions.push(u);
-    }
-    positions.sort((a, b) => posKey(a.x, a.y, a.z) - posKey(b.x, b.y, b.z));
+    // (0) Build the runtime power context for this tick.
+    this.power = {
+      observers: this.obsState,
+      hasItems: (x, y, z) => ctx.hasItems?.(x, y, z) ?? false,
+      trippedHook: (x, y, z) => this.trippedHooks.has(posKey(x, y, z)),
+      worldTime: ctx.worldTime ?? 0,
+    };
 
+    // (1) Registry sync — rescan only the chunks whose data changed.
+    this.syncRegistry(world);
+
+    // (2) Tripwire tripping pass (player AABB vs the string cells).
+    this.tickTripwires(ctx);
+
+    // (3) Component state machines (deterministic sorted order).
+    const positions = [...this.components.values()].sort((a, b) => posKey(a.x, a.y, a.z) - posKey(b.x, b.y, b.z));
     const c: ComponentCtx = {
       world,
-      observers: this.obsState,
+      power: this.power,
       write: (x, y, z, id, meta) => this.write(world, x, y, z, id, meta),
     };
     const moves: PistonWrite[] = [];
-
-    // (2) Component state machines (deterministic order).
     for (const p of positions) {
       switch (p.id) {
         case Block.Piston:
@@ -119,17 +408,26 @@ export class Redstone {
         case Block.WoodPressurePlate:
           tickPlate(c, p.x, p.y, p.z, ctx.entityAbove);
           break;
+        case Block.OakDoor:
+          tickDoor(c, p.x, p.y, p.z, this.doors);
+          break;
+        // Phase 5B cases (Tnt fuse, NoteBlock sound, Hopper/Dispenser/Dropper
+        // item transport) are registered here already; 5B adds the cases.
       }
     }
 
-    // (3) Apply piston moves; patch the universe (and keep `keys` in sync —
-    // pruning runs later and must not drop state that just moved).
+    // (4) Apply piston moves; patch the registries (chunk rescans also
+    // reconcile on the next tick — the immediate patch keeps same-tick
+    // behavior consistent with the old universe patching).
     if (moves.length > 0) {
       for (const m of moves) {
         world.setBlock(m.x, m.y, m.z, m.id, m.meta);
         world.markDirtyAround(m.x, m.y, m.z); // shared helper (Phase 4 DRY)
-        this.patchUniverse(universe, m.x, m.y, m.z, m.id);
-        keys.add(posKey(m.x, m.y, m.z));
+        this.patchRegistry(world, m.x, m.y, m.z, m.id);
+        // A pushed solid landing on a tripwire string cell breaks the string.
+        if (m.id !== AIR && m.id !== Block.Tripwire && isSolidBlock(m.id)) {
+          this.clearStringAt(world, m.x, m.y, m.z);
+        }
       }
       // Read the front block of just-extended pistons (after the push).
       for (const st of this.pistons.values()) {
@@ -140,24 +438,24 @@ export class Redstone {
       }
     }
 
-    // (4) Dust fixed point + passive components, bounded convergence.
-    let dust = this.dustList(universe);
+    // (5) Dust fixed point + passive components, bounded convergence.
     for (let round = 0; round < DUST_MAX_ROUNDS; round++) {
-      let changed = propagateDustToFixedPoint(world, dust, this.obsState);
+      const dustList = [...this.dust.values()];
+      let changed = propagateDustToFixedPoint(world, dustList, this.power);
       for (const p of positions) {
         if (p.id === Block.RedstoneTorch) changed = tickTorch(c, p.x, p.y, p.z) || changed;
         else if (p.id === Block.RedstoneLamp) changed = tickLamp(c, p.x, p.y, p.z) || changed;
       }
       if (!changed) break;
-      // A torch/lamp change can alter the dust (torch) — refresh lists and
-      // run one more round (capped by DUST_MAX_ROUNDS).
-      dust = this.dustList(universe);
+      // A torch/lamp change can alter the dust — run one more round (capped).
     }
 
-    // (5) Prune runtime state for blocks that left the universe.
-    for (const map of [this.repeaters, this.comparators, this.observers, this.pistons, this.buttons]) {
+    // (6) Prune runtime state for blocks that no longer exist.
+    const live = new Set<number>(this.components.keys());
+    for (const k of this.dust.keys()) live.add(k);
+    for (const map of [this.repeaters, this.comparators, this.observers, this.pistons, this.buttons, this.doors]) {
       for (const k of [...map.keys()]) {
-        if (!keys.has(k)) map.delete(k);
+        if (!live.has(k)) map.delete(k);
       }
     }
   }
@@ -170,42 +468,101 @@ export class Redstone {
     world.markDirtyAround(x, y, z); // shared helper (Phase 4 DRY)
   }
 
-  /** Redstone blocks (id 18..34) in the player's 3×3 chunk region. */
-  private scanUniverse(world: World, ctx: RedstoneCtx): Map<number, UniverseBlock> {
-    const map = new Map<number, UniverseBlock>();
-    const cx0 = Math.floor(ctx.playerX / CHUNK_SIZE_X);
-    const cz0 = Math.floor(ctx.playerZ / CHUNK_SIZE_Z);
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dz = -1; dz <= 1; dz++) {
-        const chunk = world.getChunk(cx0 + dx, cz0 + dz);
-        if (!chunk) continue;
-        const ids = chunk.ids;
-        const bx = (cx0 + dx) * CHUNK_SIZE_X;
-        const bz = (cz0 + dz) * CHUNK_SIZE_Z;
-        for (let i = 0; i < CHUNK_VOLUME; i++) {
-          const id = ids[i];
-          if (!isRedstoneBlock(id)) continue;
-          const x = bx + (i & 15);
-          const z = bz + ((i >> 4) & 15);
-          const y = i >> 8;
-          map.set(posKey(x, y, z), { x, y, z, id });
+  /**
+   * Rebuild the registry entries for the chunks whose data changed since the
+   * last sync (budgeted — the remainder stays queued in the World).
+   */
+  private syncRegistry(world: World): void {
+    const slots = world.drainChangedChunks(REGISTRY_SCAN_BUDGET);
+    for (const slot of slots) {
+      const cx = Math.floor(slot / WORLD_CHUNKS_Z) - 8;
+      const cz = (slot % WORLD_CHUNKS_Z) - 8;
+      let set = this.chunkReg.get(slot);
+      if (!set) {
+        set = new Set<number>();
+        this.chunkReg.set(slot, set);
+      }
+      for (const k of [...set]) {
+        this.components.delete(k);
+        this.dust.delete(k);
+      }
+      set.clear();
+      const chunk = world.getChunk(cx, cz);
+      if (!chunk) return;
+      const ids = chunk.ids;
+      const bx = cx * CHUNK_SIZE_X;
+      const bz = cz * CHUNK_SIZE_Z;
+      for (let i = 0; i < CHUNK_VOLUME; i++) {
+        const id = ids[i];
+        if (id === AIR) continue;
+        const x = bx + (i & 15);
+        const z = bz + ((i >> 4) & 15);
+        const y = i >> 8;
+        const k = posKey(x, y, z);
+        if (id === Block.RedstoneDust) {
+          this.dust.set(k, { x, y, z, id });
+        } else if (REDSTONE_COMPONENT_IDS.has(id)) {
+          this.components.set(k, { x, y, z, id });
+        } else {
+          continue;
+        }
+        set.add(k);
+      }
+    }
+  }
+
+  /** Immediately register/unregister a block after a piston move. */
+  private patchRegistry(world: World, x: number, y: number, z: number, id: number): void {
+    const k = posKey(x, y, z);
+    if (id === Block.RedstoneDust) {
+      this.dust.delete(k);
+      this.components.delete(k);
+      this.dust.set(k, { x, y, z, id });
+    } else if (REDSTONE_COMPONENT_IDS.has(id)) {
+      this.dust.delete(k);
+      this.components.delete(k);
+      this.components.set(k, { x, y, z, id });
+    } else {
+      this.dust.delete(k);
+      this.components.delete(k);
+    }
+    // Keep the per-chunk key set in sync (best effort; the next rescan of
+    // the chunk reconciles fully).
+    const cx = Math.floor(x / CHUNK_SIZE_X);
+    const cz = Math.floor(z / CHUNK_SIZE_Z);
+    const slot = (cx + 8) * WORLD_CHUNKS_Z + (cz + 8);
+    const set = this.chunkReg.get(slot);
+    if (set) {
+      if (id === Block.RedstoneDust || REDSTONE_COMPONENT_IDS.has(id)) set.add(k);
+      else set.delete(k);
+    }
+  }
+
+  /**
+   * Tripwire tripping pass: for every link, if the player AABB overlaps any
+   * of the string cells both endpoint hooks are tripped (they then output
+   * 15 via the power model until the player leaves all cells of that string).
+   */
+  private tickTripwires(ctx: RedstoneCtx): void {
+    if (this.tripwireLinks.size === 0) {
+      this.trippedHooks = new Set<number>();
+      return;
+    }
+    const tripped = new Set<number>();
+    for (const [aKey, bKey] of this.tripwireLinks) {
+      if (bKey < aKey) continue; // each link once
+      const a = decodeKey(aKey);
+      const b = decodeKey(bKey);
+      const cells = tripwireCellsBetween(a, b);
+      if (!cells) continue;
+      for (const c of cells) {
+        if (ctx.entityAbove(c.x, c.y, c.z)) {
+          tripped.add(aKey);
+          tripped.add(bKey);
+          break;
         }
       }
     }
-    return map;
-  }
-
-  private patchUniverse(universe: Map<number, UniverseBlock>, x: number, y: number, z: number, id: number): void {
-    const k = posKey(x, y, z);
-    if (isRedstoneBlock(id)) universe.set(k, { x, y, z, id });
-    else universe.delete(k);
-  }
-
-  /** Sorted dust list (deterministic forward sweep). */
-  private dustList(universe: Map<number, UniverseBlock>): UniverseBlock[] {
-    const dust: UniverseBlock[] = [];
-    for (const u of universe.values()) if (u.id === Block.RedstoneDust) dust.push(u);
-    dust.sort((a, b) => posKey(a.x, a.y, a.z) - posKey(b.x, b.y, b.z));
-    return dust;
+    this.trippedHooks = tripped;
   }
 }

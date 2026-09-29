@@ -238,10 +238,14 @@ describe('creative inventory prefill', () => {
     const inv = new Inventory();
     const added = fillCreativeInventory(inv);
     const placeable = ALL_ITEM_IDS.filter((id) => isPlaceable(id));
-    expect(placeable.length).toBe(36);
-    expect(added).toBe(36 * 64);
+    // Phase 5A: the full 1.13 block set → 42 placeable blocks (the tripwire
+    // string block has no item); the 45-slot inventory (Phase 5A expansion)
+    // fits them all with 3 slots to spare.
+    expect(placeable.length).toBe(42);
+    expect(added).toBe(42 * 64);
     for (const id of placeable) expect(inv.countItem(id)).toBe(64);
-    expect(inv.isFull).toBe(true);
+    expect(inv.isFull).toBe(false);
+    expect(inv.firstEmpty()).toBe(42);
   });
 
   it('leaves existing items untouched (idempotent top-up)', () => {

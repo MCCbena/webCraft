@@ -95,6 +95,25 @@ export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: n
       ctx.fill();
       break;
     }
+    case Item.TripwireString: {
+      // Phase 5A: a small string spool (the hook-connection item)
+      ctx.strokeStyle = '#96825f';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(4, 5);
+      ctx.quadraticCurveTo(8, 2, 12, 5);
+      ctx.stroke();
+      ctx.fillStyle = '#96825f';
+      ctx.beginPath();
+      ctx.ellipse(8, 10, 5, 3.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#6b5c3e';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(8, 10, 5, 3.4, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    }
     default: {
       const tool = getItemDef(itemId)?.tool;
       if (!tool) break;
