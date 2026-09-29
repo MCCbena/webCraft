@@ -185,13 +185,55 @@ describe('Phase 5A block definitions (design.md §4/§8)', () => {
       expect(d.drop, `${name} drop`).toBe(drop);
     };
     expectProps(Block.Hopper, 'hopper', true, true);
-    expectProps(Block.DaylightDetector, 'daylight_detector', true, true);
+    expectProps(Block.DaylightDetector, 'daylight_detector', false, true); // 1.13: thin slab, non-solid (players walk through); opaque kept for rendering
     expectProps(Block.Tnt, 'tnt', true, true);
     expectProps(Block.NoteBlock, 'note_block', true, true);
     expectProps(Block.Rail, 'rail', false, false);
     expectProps(Block.PoweredRail, 'powered_rail', false, false);
     // the string drops nothing (1.13: the string is recreated by hooks)
     expectProps(Block.Tripwire, 'tripwire', false, false, 0);
+  });
+
+  it('1.13 collision contract: every thin-rendered component is non-solid and every full-cube block is solid (render shape vs hitbox)', () => {
+    // Thin components rendered as slab/torch/rail/hook/string — in Java 1.13
+    // players can walk through all of these, so their collision box must not
+    // be a full block. (daylight_detector was the one outlier: shape 'slab'
+    // but solid: true → user-reported texture/collision mismatch.)
+    const nonSolid = [
+      Block.DaylightDetector, // slab
+      Block.Repeater,         // slab
+      Block.Comparator,       // slab
+      Block.StoneButton,      // slab
+      Block.WoodButton,       // slab
+      Block.StonePressurePlate, // slab
+      Block.WoodPressurePlate,  // slab
+      Block.Torch,            // torch
+      Block.RedstoneTorch,    // torch
+      Block.Lever,            // torch
+      Block.Rail,             // rail
+      Block.PoweredRail,      // rail
+      Block.Tripwire,         // string
+      Block.TripwireHook,     // hook
+    ];
+    for (const id of nonSolid) {
+      const d = getBlockDef(id);
+      expect(d.solid, `${d.name} must be non-solid (thin 1.13 component)`).toBe(false);
+    }
+    // Full-cube blocks keep their full collision box.
+    const fullSolid = [
+      Block.Stone, Block.Planks, Block.RedstoneBlock, Block.RedstoneLamp,
+      Block.Piston, Block.StickyPiston, Block.Observer, Block.Dispenser,
+      Block.Dropper, Block.Hopper, Block.Tnt, Block.NoteBlock,
+    ];
+    for (const id of fullSolid) {
+      const d = getBlockDef(id);
+      expect(d.solid, `${d.name} must be solid (full cube)`).toBe(true);
+    }
+    // The fix must not touch rendering: the daylight detector stays an
+    // opaque slab (visible solid-looking slab, just no collision box).
+    const dd = getBlockDef(Block.DaylightDetector);
+    expect(dd.shape).toBe('slab');
+    expect(dd.opaque).toBe(true);
   });
 
   it('new 5A meta specs are correct', () => {

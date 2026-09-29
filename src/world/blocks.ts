@@ -383,7 +383,7 @@ export const BLOCK_DEFS: BlockDef[] = [
   def(Block.OakDoor, 'oak_door', { solid: true, opaque: false, hardness: 1.5, drop: Block.OakDoor, tiles: { top: Tile.DoorBottom, side: Tile.DoorBottom, bottom: Tile.DoorBottom }, meta: { kind: 'door' }, shape: 'full' }),
   // --- Phase 5A (design.md §4/§8) ---
   def(Block.Hopper, 'hopper', { solid: true, opaque: true, hardness: 1.5, drop: Block.Hopper, tiles: { top: Tile.Hopper, side: Tile.Hopper, bottom: Tile.Hopper }, meta: { kind: 'facing' }, shape: 'hopper' }),
-  def(Block.DaylightDetector, 'daylight_detector', { solid: true, opaque: true, hardness: 0.5, drop: Block.DaylightDetector, tiles: { top: Tile.DaylightDetector, side: Tile.DaylightDetector, bottom: Tile.DaylightDetector }, meta: { kind: 'daylight' }, shape: 'slab' }),
+  def(Block.DaylightDetector, 'daylight_detector', { solid: false, opaque: true, hardness: 0.5, drop: Block.DaylightDetector, tiles: { top: Tile.DaylightDetector, side: Tile.DaylightDetector, bottom: Tile.DaylightDetector }, meta: { kind: 'daylight' }, shape: 'slab' }),
   def(Block.Tnt, 'tnt', { solid: true, opaque: true, hardness: 0.0, drop: Block.Tnt, tiles: { top: Tile.TntTop, side: Tile.TntSide, bottom: Tile.TntTop }, litTiles: { top: Tile.TntPrimed, side: Tile.TntPrimed, bottom: Tile.TntPrimed }, meta: { kind: 'onOff' }, shape: 'full' }),
   def(Block.NoteBlock, 'note_block', { solid: true, opaque: true, hardness: 1.5, drop: Block.NoteBlock, tiles: { top: Tile.NoteBlock, side: Tile.NoteBlock, bottom: Tile.NoteBlock }, meta: { kind: 'note' }, shape: 'full' }),
   def(Block.Rail, 'rail', { solid: false, opaque: false, hardness: 0.5, drop: Block.Rail, tiles: { top: Tile.Rail, side: Tile.Rail, bottom: Tile.Rail }, meta: NONE, shape: 'rail' }),
