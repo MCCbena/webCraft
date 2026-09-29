@@ -73,6 +73,13 @@ export interface PistonWrite {
   z: number;
   id: number;
   meta: number;
+  /**
+   * Phase 5B: when a pushed block is SHIFTED by +facing (source → dest), the
+   * source cell is recorded here. tick.ts uses it to move the block's runtime
+   * state (container contents, primed-TNT fuse) along with the block in a
+   * pre-pass, so a piston moving a container/TNT carries its state intact.
+   */
+  movedFrom?: { x: number; y: number; z: number };
 }
 
 /** Context shared by all component machines. */
@@ -380,7 +387,7 @@ export function canExtend(c: ComponentCtx, x: number, y: number, z: number, f: n
  * the 2-tick extension countdown); returns false (no moves enqueued) when
  * the push is no longer possible.
  */
-function extend(c: ComponentCtx, x: number, y: number, z: number, id: number, meta: number, f: number, st: PistonState, moves: PistonWrite[]): boolean {
+function extend(c: ComponentCtx, x: number, y: number, z: number, id: number, meta: number, f: number, st: PistonState, moves: PistonWrite[], headDests: { x: number; y: number; z: number }[]): boolean {
   if (!canExtend(c, x, y, z, f)) return false;
   const dx = FACING_X[f];
   const dz = FACING_Z[f];
@@ -408,10 +415,15 @@ function extend(c: ComponentCtx, x: number, y: number, z: number, id: number, me
   for (const e of els) moves.push({ x: e.x, y, z: e.z, id: AIR, meta: 0 });
   for (let i = els.length - 1; i >= 0; i--) {
     const e = els[i];
-    moves.push({ x: e.x + dx, y, z: e.z + dz, id: e.id, meta: e.meta });
+    // Phase 5B: record the source cell so tick.ts can relocate the block's
+    // runtime state (container contents / primed-TNT fuse) with the move.
+    moves.push({ x: e.x + dx, y, z: e.z + dz, id: e.id, meta: e.meta, movedFrom: { x: e.x, y, z: e.z } });
   }
   moves.push({ x, y, z, id: AIR, meta: 0 });
   moves.push({ x: x + dx, y, z: z + dz, id, meta });
+  // Phase 5B: the head extends from P+d into P+2d — record that destination
+  // so tick.ts can check it against the player AABB (2 HP push damage, 1.13).
+  headDests.push({ x: x + 2 * dx, y, z: z + 2 * dz });
   st.phase = 'extended';
   st.frontX = x + 3 * dx; // the block in front of the extended head
   st.frontY = y;
@@ -488,7 +500,7 @@ export function tickDoor(c: ComponentCtx, x: number, y: number, z: number, manua
   return true;
 }
 
-export function tickPiston(c: ComponentCtx, x: number, y: number, z: number, states: Map<number, PistonState>, moves: PistonWrite[]): void {
+export function tickPiston(c: ComponentCtx, x: number, y: number, z: number, states: Map<number, PistonState>, moves: PistonWrite[], headDests: { x: number; y: number; z: number }[] = []): void {
   const id = c.world.getBlock(x, y, z);
   if (id !== Block.Piston && id !== Block.StickyPiston) return;
   const sticky = id === Block.StickyPiston;
@@ -509,7 +521,7 @@ export function tickPiston(c: ComponentCtx, x: number, y: number, z: number, sta
     // aborts; the piston stays put and a fresh extension can start next
     // tick while it is powered).
     if (--st.ticks > 0) return;
-    if (!extend(c, x, y, z, id, c.world.getMeta(x, y, z), f, st, moves)) {
+    if (!extend(c, x, y, z, id, c.world.getMeta(x, y, z), f, st, moves, headDests)) {
       states.delete(key);
       return;
     }

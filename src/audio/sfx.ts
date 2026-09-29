@@ -1,11 +1,13 @@
 /**
- * WebCraft — Sound effects (Phase 2B, [modes]).
- * WebAudio oscillator-based SFX — no asset files.
+ * WebCraft — Sound effects (Phase 2B, [modes]; Phase 5B: boom + note block).
+ * WebAudio oscillator/noise-based SFX — no asset files.
  * The AudioContext is lazy-initialized on the first user gesture (browser
  * autoplay policy) and is a no-op outside a browser environment (tests).
  */
 
-export type SfxName = 'break' | 'place' | 'hit' | 'eat' | 'mode';
+import { Block } from '../world/blocks';
+
+export type SfxName = 'break' | 'place' | 'hit' | 'eat' | 'mode' | 'boom';
 
 const GAIN = 0.35; // master level per voice
 
@@ -49,7 +51,53 @@ export class Sfx {
       case 'mode': // rising blip
         this.voice(ctx, 'sine', 440, 880, t0, 0.12, GAIN * 0.7);
         break;
+      case 'boom': // Phase 5B: TNT explosion — low sine thump + decaying noise burst
+        this.voice(ctx, 'sine', 120, 30, t0, 0.5, GAIN);
+        this.noise(ctx, t0, 0.4, GAIN * 0.8);
+        break;
     }
+  }
+
+  /**
+   * Phase 5B: play a note block note. Frequency = `80 * 2^(pitch/12)` Hz
+   * (pitch 0-24); timbre by the block directly above (1.13 note block):
+   *   wood/log/planks → triangle ("guitar"), snow → sine ("bass"),
+   *   stone/cobble → square ("snare"), iron/glass → square ("hi-hat"),
+   *   anything else → sine ("basal").
+   */
+  playNote(pitch: number, blockAbove: number): void {
+    this.ensure();
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== 'running') return;
+    const t0 = ctx.currentTime;
+    const freq = 80 * Math.pow(2, pitch / 12);
+    let type: OscillatorType = 'sine'; // basal
+    let dur = 0.4;
+    switch (blockAbove) {
+      case Block.Log:
+      case Block.Planks:
+        type = 'triangle'; // guitar
+        dur = 0.35;
+        break;
+      case Block.Snow:
+        type = 'sine'; // bass (low, long)
+        dur = 0.5;
+        break;
+      case Block.Stone:
+      case Block.Cobblestone:
+        type = 'square'; // snare
+        dur = 0.2;
+        break;
+      case Block.IronOre:
+      case Block.Glass:
+        type = 'square'; // hi-hat (very short)
+        dur = 0.1;
+        break;
+      default:
+        type = 'sine'; // basal
+        dur = 0.4;
+    }
+    this.voice(ctx, type, freq, freq, t0, dur, GAIN * 0.8);
   }
 
   /** Single oscillator + gain envelope, exponential decay to silence. */
@@ -73,5 +121,28 @@ export class Sfx {
     gain.connect(ctx.destination);
     osc.start(start);
     osc.stop(start + dur + 0.02);
+  }
+
+  /** Phase 5B: decaying white-noise burst through a low-pass filter (explosion). */
+  private noise(ctx: AudioContext, start: number, dur: number, peak: number): void {
+    const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(900, start);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(peak, start);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + dur);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start(start);
+    src.stop(start + dur);
   }
 }

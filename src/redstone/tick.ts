@@ -38,20 +38,48 @@
  *  - isHookTripped(x, y, z) — query the tripped-hook set.
  */
 
-import { AIR, Block, isSolidBlock, isDoorTop, isDoorOpen, setDoorOpen, setOn, setSideOn } from '../world/blocks';
+import {
+  AIR,
+  Block,
+  getFacing,
+  getNotePitch,
+  itemBlockId,
+  isOn,
+  isSolidBlock,
+  isDoorTop,
+  isDoorOpen,
+  setDoorOpen,
+  setOn,
+  setSideOn,
+} from '../world/blocks';
 import { CHUNK_SIZE_X, CHUNK_SIZE_Z, CHUNK_VOLUME } from '../world/chunk';
 import { WORLD_CHUNKS_Z } from '../world/world';
 import type { World } from '../world/world';
+import type { ItemStack } from '../player/inventory';
 import {
   BUTTON_TICKS_STONE,
   BUTTON_TICKS_WOOD,
   DUST_MAX_ROUNDS,
+  FACING_X,
+  FACING_Z,
   REDSTONE_COMPONENT_IDS,
   posKey,
   type RedstoneCtx,
   type UniverseBlock,
 } from './types';
-import { propagateDustToFixedPoint, type ObserverState, type PowerCtx } from './network';
+import {
+  DISPENSER_COOLDOWN_TICKS,
+  DROPPER_COOLDOWN_TICKS,
+  HOPPER_TRANSFER_PER_TICK,
+  ContainerRegistry,
+  isContainerId,
+} from './containers';
+import {
+  propagateDustToFixedPoint,
+  totalPowerReceived,
+  type ObserverState,
+  type PowerCtx,
+} from './network';
 import {
   tickButton,
   tickDelayed,
@@ -73,6 +101,18 @@ import {
 const REGISTRY_SCAN_BUDGET = 32;
 /** Tripwire string link reach in blocks (design.md §8.7). */
 const TRIPWIRE_LINK_REACH = 40;
+
+// --- Phase 5B: TNT / piston damage (design.md §8.3/§8.4) --------------------
+/** TNT fuse length in ticks (80 = 4 s, 1.13). */
+export const TNT_FUSE_TICKS = 80;
+/** TNT explosion radius (Euclidean, from the TNT block center, 1.13). */
+export const TNT_EXPLOSION_RADIUS = 4;
+/** Peak TNT damage at the explosion center (decays to 0 at distance 5). */
+export const TNT_MAX_DAMAGE = 12;
+/** Distance (blocks) at which TNT damage reaches 0. */
+export const TNT_DAMAGE_FALLOFF = 5;
+/** Piston-push damage when the head lands on the player (1.13). */
+export const PISTON_PUSH_DAMAGE = 2;
 
 /** Decode a posKey back to world coords (inverse of types.posKey). */
 function decodeKey(k: number): { x: number; y: number; z: number } {
@@ -135,6 +175,20 @@ export class Redstone {
   /** tripwire (Phase 5A): hooks whose string is currently tripped */
   private trippedHooks = new Set<number>();
 
+  // --- Phase 5B: container contents + TNT + note + dropper/dispenser -------
+  /** container content state, keyed by posKey (follows the blocks). */
+  readonly containers = new ContainerRegistry();
+  /** primed TNT fuse countdown, posKey → ticks remaining. */
+  private readonly tntFuse = new Map<number, number>();
+  /** TNT power state (rising-edge detection), posKey → was powered last tick. */
+  private readonly tntPowered = new Map<number, boolean>();
+  /** note block power state (rising-edge detection), posKey → was powered. */
+  private readonly notePowered = new Map<number, boolean>();
+  /** dropper eject cooldown, posKey → ticks remaining. */
+  private readonly dropperCooldown = new Map<number, number>();
+  /** dispenser use cooldown, posKey → ticks remaining. */
+  private readonly dispenserCooldown = new Map<number, number>();
+
   /** Runtime power context, rebuilt each tick from the RedstoneCtx. */
   private power: PowerCtx = {
     observers: { isOutputting: () => false },
@@ -153,13 +207,18 @@ export class Redstone {
   }
 
   /**
-   * 5B contract — prime a TNT (sets the primed meta bit + remesh mark).
-   * The fuse countdown (80 ticks) and explosion are 5B's responsibility.
+   * 5B contract — prime a TNT (sets the primed meta bit + remesh mark) and
+   * arms the fuse countdown (TNT_FUSE_TICKS). The fuse/explosion state machine
+   * (Block.Tnt tick case) counts it down and detonates at 0. Idempotent:
+   * re-priming an already-primed TNT just refreshes the fuse.
    */
   primeTnt(world: World, x: number, y: number, z: number): void {
     if (world.getBlock(x, y, z) !== Block.Tnt) return;
-    world.setBlock(x, y, z, Block.Tnt, setOn(world.getMeta(x, y, z), true));
-    world.markDirtyAround(x, y, z);
+    if (!isOn(world.getMeta(x, y, z))) {
+      world.setBlock(x, y, z, Block.Tnt, setOn(world.getMeta(x, y, z), true));
+      world.markDirtyAround(x, y, z);
+    }
+    this.tntFuse.set(posKey(x, y, z), TNT_FUSE_TICKS);
   }
 
   /**
@@ -173,6 +232,8 @@ export class Redstone {
     const oldId = world.getBlock(x, y, z);
     world.setBlock(x, y, z, id, meta);
     world.markDirtyAround(x, y, z);
+    // Phase 5B: keep container contents in lockstep with the blocks.
+    this.containers.reconcile(x, y, z, oldId, id);
     if (oldId === Block.TripwireHook) this.clearStringAt(world, x, y, z);
     else if (oldId === Block.Tripwire && id !== Block.Tripwire) this.clearStringAt(world, x, y, z);
   }
@@ -385,11 +446,12 @@ export class Redstone {
       write: (x, y, z, id, meta) => this.write(world, x, y, z, id, meta),
     };
     const moves: PistonWrite[] = [];
+    const headDests: { x: number; y: number; z: number }[] = [];
     for (const p of positions) {
       switch (p.id) {
         case Block.Piston:
         case Block.StickyPiston:
-          tickPiston(c, p.x, p.y, p.z, this.pistons, moves);
+          tickPiston(c, p.x, p.y, p.z, this.pistons, moves, headDests);
           break;
         case Block.Observer:
           tickObserver(c, p.x, p.y, p.z, this.observers);
@@ -411,8 +473,22 @@ export class Redstone {
         case Block.OakDoor:
           tickDoor(c, p.x, p.y, p.z, this.doors);
           break;
-        // Phase 5B cases (Tnt fuse, NoteBlock sound, Hopper/Dispenser/Dropper
-        // item transport) are registered here already; 5B adds the cases.
+        // --- Phase 5B cases -------------------------------------------------
+        case Block.Hopper:
+          this.tickHopper(p.x, p.y, p.z);
+          break;
+        case Block.Dropper:
+          this.tickDropper(world, p.x, p.y, p.z);
+          break;
+        case Block.Dispenser:
+          this.tickDispenser(world, p.x, p.y, p.z);
+          break;
+        case Block.Tnt:
+          this.tickTnt(world, p.x, p.y, p.z, ctx);
+          break;
+        case Block.NoteBlock:
+          this.tickNote(world, p.x, p.y, p.z, ctx);
+          break;
       }
     }
 
@@ -420,13 +496,44 @@ export class Redstone {
     // reconcile on the next tick — the immediate patch keeps same-tick
     // behavior consistent with the old universe patching).
     if (moves.length > 0) {
+      // Phase 5B pre-pass: relocate the runtime state of pushed blocks
+      // (container contents + primed-TNT fuse) BEFORE the world writes, so the
+      // clear→reconcile that follows does not destroy the moved state first.
       for (const m of moves) {
+        const from = m.movedFrom;
+        if (!from) continue;
+        this.containers.move(from.x, from.y, from.z, m.x, m.y, m.z);
+        const fk = posKey(from.x, from.y, from.z);
+        const tk = posKey(m.x, m.y, m.z);
+        const fuse = this.tntFuse.get(fk);
+        if (fuse !== undefined) {
+          this.tntFuse.delete(fk);
+          this.tntFuse.set(tk, fuse);
+        }
+        const tntPow = this.tntPowered.get(fk);
+        if (tntPow !== undefined) {
+          this.tntPowered.delete(fk);
+          this.tntPowered.set(tk, tntPow);
+        }
+      }
+      for (const m of moves) {
+        const oldId = world.getBlock(m.x, m.y, m.z);
         world.setBlock(m.x, m.y, m.z, m.id, m.meta);
         world.markDirtyAround(m.x, m.y, m.z); // shared helper (Phase 4 DRY)
         this.patchRegistry(world, m.x, m.y, m.z, m.id);
+        this.containers.reconcile(m.x, m.y, m.z, oldId, m.id); // Phase 5B
         // A pushed solid landing on a tripwire string cell breaks the string.
         if (m.id !== AIR && m.id !== Block.Tripwire && isSolidBlock(m.id)) {
           this.clearStringAt(world, m.x, m.y, m.z);
+        }
+      }
+      // Phase 5B: piston push damage — if the head's destination AABB
+      // overlaps the player, deal PISTON_PUSH_DAMAGE (survival only, via the
+      // ctx hook; the piston still extended).
+      for (const hd of headDests) {
+        if (ctx.entityAbove(hd.x, hd.y, hd.z)) {
+          ctx.onPlayerDamage?.(PISTON_PUSH_DAMAGE, 'piston');
+          break;
         }
       }
       // Read the front block of just-extended pistons (after the push).
@@ -453,11 +560,25 @@ export class Redstone {
     // (6) Prune runtime state for blocks that no longer exist.
     const live = new Set<number>(this.components.keys());
     for (const k of this.dust.keys()) live.add(k);
-    for (const map of [this.repeaters, this.comparators, this.observers, this.pistons, this.buttons, this.doors]) {
+    for (const map of [
+      this.repeaters,
+      this.comparators,
+      this.observers,
+      this.pistons,
+      this.buttons,
+      this.doors,
+      this.tntFuse,
+      this.tntPowered,
+      this.notePowered,
+      this.dropperCooldown,
+      this.dispenserCooldown,
+    ]) {
       for (const k of [...map.keys()]) {
         if (!live.has(k)) map.delete(k);
       }
     }
+    // Phase 5B: container state is pruned by the world-write reconcile
+    // (worldEdit / piston moves / explosion); the registry is not component-keyed.
   }
 
   // --- helpers -------------------------------------------------------------
@@ -564,5 +685,234 @@ export class Redstone {
       }
     }
     this.trippedHooks = tripped;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 5B: containers, TNT, note block (design.md §8.4/§8.5)
+  // -------------------------------------------------------------------------
+
+  /** Container slots for the GUI (null when there is no container here). */
+  getContainerSlots(x: number, y: number, z: number): (ItemStack | null)[] | null {
+    return this.containers.slots(x, y, z) ?? null;
+  }
+
+  /** Number of slots the container at (x,y,z) has (0 when none). */
+  containerSlotCount(x: number, y: number, z: number): number {
+    return this.containers.slotCount(x, y, z);
+  }
+
+  /**
+   * Phase 5B: break a container — return ALL of its contents to the player via
+   * `addItem(id, count)` and destroy the state. Returns the total item count
+   * returned. Pure (the caller supplies the inventory sink), so it is directly
+   * unit-testable. The game's survival break path uses this (creative just
+   * breaks instantly without calling it).
+   */
+  drainContainerToInventory(x: number, y: number, z: number, addItem: (id: number, count: number) => void): number {
+    const slots = this.containers.slots(x, y, z);
+    let returned = 0;
+    if (slots) {
+      for (const s of slots) {
+        if (s) {
+          addItem(s.id, s.count);
+          returned += s.count;
+        }
+      }
+    }
+    this.containers.destroy(x, y, z);
+    return returned;
+  }
+
+  /** Place a block + remesh + reconcile container state (dropper/dispenser). */
+  private placeBlock(world: World, x: number, y: number, z: number, id: number, meta: number): void {
+    const oldId = world.getBlock(x, y, z);
+    world.setBlock(x, y, z, id, meta);
+    world.markDirtyAround(x, y, z);
+    this.containers.reconcile(x, y, z, oldId, id);
+  }
+
+  /** Remove a block (set to air) + remesh + reconcile container state. */
+  private removeBlock(world: World, x: number, y: number, z: number): void {
+    const oldId = world.getBlock(x, y, z);
+    if (oldId === AIR) return;
+    world.setBlock(x, y, z, AIR);
+    world.markDirtyAround(x, y, z);
+    this.containers.reconcile(x, y, z, oldId, AIR);
+  }
+
+  /**
+   * Hopper (1.13, §8.5): every tick, pull up to HOPPER_TRANSFER_PER_TICK items
+   * from the container directly above into itself, then push up to the same
+   * into the container directly below. Items enter the top and exit the bottom.
+   */
+  private tickHopper(x: number, y: number, z: number): void {
+    if (this.containers.has(x, y + 1, z) && this.containers.hasRoom(x, y, z)) {
+      this.containers.transfer(x, y + 1, z, x, y, z, HOPPER_TRANSFER_PER_TICK);
+    }
+    if (this.containers.has(x, y - 1, z) && this.containers.hasRoom(x, y - 1, z)) {
+      this.containers.transfer(x, y, z, x, y - 1, z, HOPPER_TRANSFER_PER_TICK);
+    }
+  }
+
+  /**
+   * Dropper (1.13, §8.5): while powered, every DROPPER_COOLDOWN_TICKS ticks
+   * eject one item in the facing direction. Front air + placeable block item →
+   * place the block; front a container → insert one item (if room); otherwise
+   * the item stays (no ejection, no cooldown reset).
+   */
+  private tickDropper(world: World, x: number, y: number, z: number): void {
+    const key = posKey(x, y, z);
+    if (totalPowerReceived(world, x, y, z, this.power) <= 0) {
+      this.dropperCooldown.delete(key);
+      return;
+    }
+    // The cycle starts (at DROPPER_COOLDOWN_TICKS) on the first powered tick and
+    // counts down; the ejection fires when it reaches 0 (i.e. after 8 ticks).
+    if (this.dropperCooldown.get(key) === undefined) this.dropperCooldown.set(key, DROPPER_COOLDOWN_TICKS);
+    const rem = this.dropperCooldown.get(key)! - 1;
+    if (rem > 0) {
+      this.dropperCooldown.set(key, rem);
+      return;
+    }
+    this.dropperCooldown.set(key, DROPPER_COOLDOWN_TICKS); // restart the cycle
+    const stack = this.containers.firstItem(x, y, z);
+    if (!stack) return; // empty → nothing to eject
+    const f = getFacing(world.getMeta(x, y, z));
+    const fx = x + FACING_X[f];
+    const fz = z + FACING_Z[f];
+    const frontId = world.getBlock(fx, y, fz);
+    if (frontId === AIR) {
+      const bid = itemBlockId(stack.id);
+      if (bid !== AIR) {
+        this.containers.removeOne(x, y, z);
+        this.placeBlock(world, fx, y, fz, bid, 0);
+      }
+      // non-placeable item on an air front: it stays (no ejection)
+    } else if (isContainerId(frontId) && this.containers.hasRoom(fx, y, fz)) {
+      this.containers.removeOne(x, y, z);
+      this.containers.insertOne(fx, y, fz, stack.id);
+    }
+    // a blocked/unsuitable front keeps the item (no ejection) — 1.13
+  }
+
+  /**
+   * Dispenser (1.13, §8.5): while powered, every DISPENSER_COOLDOWN_TICKS
+   * ticks "use" one item in the facing direction. The documented 1.13 subset:
+   *   - placeable block item → place it (front air);
+   *   - TNT item → place AND prime a TNT (front air), or prime an adjacent TNT;
+   *   - door in front → toggle it open↔close;
+   *   - any other item → no-op (the item is consumed ONLY on a successful use).
+   */
+  private tickDispenser(world: World, x: number, y: number, z: number): void {
+    const key = posKey(x, y, z);
+    if (totalPowerReceived(world, x, y, z, this.power) <= 0) {
+      this.dispenserCooldown.delete(key);
+      return;
+    }
+    if (this.dispenserCooldown.get(key) === undefined) this.dispenserCooldown.set(key, DISPENSER_COOLDOWN_TICKS);
+    const rem = this.dispenserCooldown.get(key)! - 1;
+    if (rem > 0) {
+      this.dispenserCooldown.set(key, rem);
+      return;
+    }
+    this.dispenserCooldown.set(key, DISPENSER_COOLDOWN_TICKS); // restart the cycle
+    const stack = this.containers.firstItem(x, y, z);
+    if (!stack) return; // empty → nothing to use
+    const f = getFacing(world.getMeta(x, y, z));
+    const fx = x + FACING_X[f];
+    const fz = z + FACING_Z[f];
+    const frontId = world.getBlock(fx, y, fz);
+    const bid = itemBlockId(stack.id);
+    let success = false;
+    if (frontId === AIR) {
+      if (bid === Block.Tnt) {
+        this.placeBlock(world, fx, y, fz, Block.Tnt, 0);
+        this.primeTnt(world, fx, y, fz);
+        success = true;
+      } else if (bid !== AIR) {
+        this.placeBlock(world, fx, y, fz, bid, 0);
+        success = true;
+      }
+    } else if (frontId === Block.OakDoor) {
+      this.toggleDoor(world, fx, y, fz);
+      success = true;
+    } else if (frontId === Block.Tnt) {
+      this.primeTnt(world, fx, y, fz);
+      success = true;
+    }
+    // other items → no-op (item NOT consumed)
+    if (success) this.containers.removeOne(x, y, z);
+  }
+
+  /**
+   * TNT (1.13, §8.4): a rising edge of power primes a normal (unprimed) TNT;
+   * a primed TNT counts its TNT_FUSE_TICKS fuse down and detonates at 0.
+   * (A primed fuse cannot be cancelled by removing the power — 1.13.)
+   */
+  private tickTnt(world: World, x: number, y: number, z: number, ctx: RedstoneCtx): void {
+    const key = posKey(x, y, z);
+    const powered = totalPowerReceived(world, x, y, z, this.power) > 0;
+    const wasPowered = this.tntPowered.get(key) ?? false;
+    if (powered && !wasPowered && !isOn(world.getMeta(x, y, z))) {
+      this.primeTnt(world, x, y, z);
+    }
+    this.tntPowered.set(key, powered);
+    if (isOn(world.getMeta(x, y, z))) {
+      const rem = this.tntFuse.get(key) ?? TNT_FUSE_TICKS; // edge: primed w/o fuse
+      if (rem - 1 <= 0) {
+        this.tntFuse.delete(key);
+        this.explode(world, x, y, z, ctx);
+      } else {
+        this.tntFuse.set(key, rem - 1);
+      }
+    } else {
+      this.tntFuse.delete(key);
+    }
+  }
+
+  /**
+   * TNT explosion (1.13, §8.4): destroy every non-bedrock block in the
+   * TNT_EXPLOSION_RADIUS cube (Euclidean distance from the TNT center), with
+   * NO drops; remove the primed TNT itself; deal distance-falloff damage to the
+   * player (max(0, round(12·(1 − dist/5))) from the explosion center to the
+   * player's AABB center); fire the SFX + flash hook.
+   */
+  private explode(world: World, x: number, y: number, z: number, ctx: RedstoneCtx): void {
+    const cx = x + 0.5;
+    const cy = y + 0.5;
+    const cz = z + 0.5;
+    this.removeBlock(world, x, y, z); // the primed TNT itself
+    const R = TNT_EXPLOSION_RADIUS;
+    for (let dx = -R; dx <= R; dx++) {
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dz = -R; dz <= R; dz++) {
+          if (Math.sqrt(dx * dx + dy * dy + dz * dz) > R) continue;
+          if (world.getBlock(x + dx, y + dy, z + dz) === Block.Bedrock) continue;
+          this.removeBlock(world, x + dx, y + dy, z + dz);
+        }
+      }
+    }
+    const playerCenterY = ctx.playerY + 0.9; // feet + half the 1.8-tall AABB
+    const dist = Math.sqrt((cx - ctx.playerX) ** 2 + (cy - playerCenterY) ** 2 + (cz - ctx.playerZ) ** 2);
+    const dmg = Math.max(0, Math.round(TNT_MAX_DAMAGE * (1 - dist / TNT_DAMAGE_FALLOFF)));
+    if (dmg > 0) ctx.onPlayerDamage?.(dmg, 'tnt');
+    ctx.onExplosion?.(x, y, z, dist);
+  }
+
+  /**
+   * Note block (1.13, §8.4): a rising edge of power plays the note at the
+   * block's pitch (frequency 80·2^(pitch/12) Hz; timbre by the block above).
+   * Pitch cycling on right-click is handled in game.ts (interactWith).
+   */
+  private tickNote(world: World, x: number, y: number, z: number, ctx: RedstoneCtx): void {
+    const key = posKey(x, y, z);
+    const powered = totalPowerReceived(world, x, y, z, this.power) > 0;
+    const wasPowered = this.notePowered.get(key) ?? false;
+    if (powered && !wasPowered) {
+      const pitch = getNotePitch(world.getMeta(x, y, z));
+      const blockAbove = world.getBlock(x, y + 1, z);
+      ctx.onNotePlay?.(pitch, blockAbove);
+    }
+    this.notePowered.set(key, powered);
   }
 }

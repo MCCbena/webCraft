@@ -287,6 +287,93 @@ TripwireString 57 / DoorBottom 58 / DoorTop 59(48 = Phase 3 の ComparatorOn)。
 
 ---
 
+## Phase 5B 実装メモ (complete 1.13 redstone: containers + TNT + note + piston damage)
+
+### 新規ファイル
+- `src/redstone/containers.ts` — **ContainerRegistry**(コンテナ中身系)。
+  `Map<posKey, { slots: (ItemStack|null)[] }>`(ハッパー 5 / ドロッパー・ディスペンサ 9)。
+  `hasItems/totalItems/hasRoom/transfer/removeOne/insertOne/firstItem/move/reconcile`。
+  定数: `HOPPER_SLOTS 5` / `DROPPER_SLOTS 9` / `HOPPER_TRANSFER_PER_TICK 2` /
+  `DROPPER_COOLDOWN_TICKS 8` / `DISPENSER_COOLDOWN_TICKS 8` / `isContainerId` /
+  `containerSlotCount`。`ItemStack` は `player/inventory` 由来(`{id,count}`)。
+- `src/ui/containerUI.ts` — **コンテナ GUI**。コンテナスロット(上)+ プレイヤー
+  メイン 36(下)。クリック=ピック&ドロップ/スワップ/マージ、Shift=シフト移動。
+  グローバル索引 `0..N-1`=コンテナ / `N..N+35`=プレイヤーメイン(=inv 9..44)。
+- `test/redstone5b.test.ts` — 16テスト(下記)。
+
+### tick.ts 追加(5B)
+- **コンテナ state machines**: `tickHopper`(毎tick 上→自分→下へ 2item 転送)/
+  `tickDropper`(給電中 8tick毎 1item 射出: 前面 air+置ける=設置 / コンテナ=投入 /
+  他=滞留)/ `tickDispenser`(給電中 8tick毎「使用」: ブロック=設置 / TNT=配置+着火 /
+  ドア=トグル / 他=noop、成功時のみ消費)。`placeBlock`/`removeBlock` が
+  setBlock+markDirty+`containers.reconcile`。
+- **TNT**: `tntFuse`/`tntPowered` Map。`primeTnt` が meta 着火+`tntFuse=80`。
+  `tickTnt`: 給電**立ち上がり**で未着火TNTを prime。着火中は 80tick カウント→0 で
+  `explode`(半径4ユークリッド立方、bedrock 以外を air 化(ドロップなし)、TNT 自体も
+  除去、プレイヤー中心 12→距離5で0 のダメージ、`onExplosion`+`onPlayerDamage`)。
+  着火中は給電除去でも fuse 消去不可(1.13)。
+- **ノート**: `notePowered` Map。`tickNote`: 給電立ち上がりで `onNotePlay(pitch,
+  blockAbove)`。右クリック pitch サイクルは game.ts `interactWith`(0..24 範囲で
+  `(p+1)%25`、24→0)+ 発音。
+- **コンテナ state の lifecycle**: `worldEdit`(プレイヤー編集)と piston 移動が
+  `containers.reconcile` で作成/破棄。**piston 移動時は pre-pass** で
+  `PistonWrite.movedFrom` を辿り `containers.move`+`tntFuse`/`tntPowered` を移動
+  (clear→reconcile で中身が消えるのを防ぐ)。
+- **piston プレイヤーダメージ**: `components.ts` `extend()` が `headDests` に
+  ヘッド行き先(P+2d)を記録。tick は `ctx.entityAbove(headDest)` で player AABB
+  交差判定→`onPlayerDamage(2,'piston')`(piston は照常伸展)。
+- `getContainerSlots` / `containerSlotCount` / `drainContainerToInventory`
+  (破壊時中身返却、純関数でテスト可能)を公開。
+
+### types.ts / components.ts 変更
+- `RedstoneCtx`: `onPlayerDamage(amount, 'tnt'|'piston')` /
+  `onExplosion(x,y,z,dist)` / `onNotePlay(pitch, blockAbove)` を追加。
+- `PistonWrite.movedFrom?` / `tickPiston(..., headDests=[])` を追加。
+
+### game.ts 統合
+- `tickRedstone` ctx: `hasItems = rs.containers.hasItems` / `onPlayerDamage`
+  (creative スキップ+`sfx`+`vitals.damage`+respawn) / `onExplosion`(`sfx 'boom'`+
+  `flash(1-dist/8)`) / `onNotePlay`(`sfx.playNote`)。
+- `interactWith`: `Block.NoteBlock`(pitch+1 %25+発音)/ `Hopper|Dropper|Dispenser`
+  (`openContainerUI`) を追加。`onContainerSlotClick`(コンテナ↔インベントリ
+  移動/スワップ/マージ/シフト) / `openContainerUI`/`closeContainerUI` /
+  `flash`(HUD root に白 div+CSS transition、UI専用)。
+- `breakBlock`: survival で `drainContainerToInventory`(中身返却)+ コンテナ item。
+  E/Esc でコンテナ GUI 優先閉じ。
+
+### sfx.ts
+- `SfxName += 'boom'`(低 sine thump + low-pass white-noise burst)。
+- `playNote(pitch, blockAbove)`: 周波数 `80*2^(pitch/12)`Hz。音色=上段ブロック
+  (log/planks=triangle「guitar」/ snow=sine「bass」/ stone/cobble=square「snare」/
+  iron/glass=square「hi-hat」/ 他=sine「basal」)。
+
+### verify-render.ts(第3シーン)
+- `renderRedstoneFullScene()` → `screenshots/verify-redstone-full.png`。
+  石床 14×14 / button→3dust→repeater(2)→piston(ブロック押し出し)/ 点灯ランプ列/
+  開ドア(下 redstone block)/ 着火TNT(白)+未着火TNT / ノート+昼光センサー。
+  カメラ 52°俯瞰(遠く/浅いと**平面床の z 深度アーティファクト**がでるため急角度)。
+
+### 判断・簡易化(要報告)
+- **ハッパー=毎tick**: 設計書§8.5「毎ティック(8tick間隔で)」は自己矛盾。タスク
+  本文「every tick … 2 items」を優先(1.13 実機は 2tick クールダウン)。
+- **ドロッパー/ディスペンサ=8tick クールダウン**: 給電開始 tick で 8 に初期化、
+  0 で射出+リセット(=給電後 8tick 目に射出)。前面不通時は滞留+サイクル継続。
+- **ディスペンサ「使用」サブセット**: ブロック設置 / TNT 配置+着火 / ドアトグルのみ
+  (タスク指定)。他アイテムは noop(消費しない)。
+- **TNT 爆発=ユークリッド半径4立方・ドロップなし・center 12→dist5 で 0**(=タスク式
+  `max(0, round(12*(1-dist/5)))`、dist=爆発中心↔プレイヤーAABB中心)。
+- **コンテナ GUI は DOM 依存**のため単体テスト対象外(純ロジック=
+  `drainContainerToInventory`/ContainerRegistry はテスト済み)。
+- **rasterizer は opaque-only**(平面床の z 深度パッチは既知制約、タスク「fine」)。
+
+### テスト結果
+- `npm test`: **225/225 合格**(既存209 + 5B新規16)。`npm run build`: 合格
+  (`dist/assets/game.js` 固定名維持、~618kB)。`npm run verify`: 3枚再生成し目視
+  確認(terrain 不変 / redstone 不変 / redstone-full 新規: ランプ点灯+回路+ドア開+
+  白TNT+ノート+昼光 全表示)。
+
+---
+
 ## Phase 3 実装メモ (integration + render verification)
 
 ### 変更点(全ファイル)
@@ -370,6 +457,7 @@ TripwireString 57 / DoorBottom 58 / DoorTop 59(48 = Phase 3 の ComparatorOn)。
 - [polish] **最終polish完了**: (1) design.md §8.4 減衰文言を実装と整合に修正(「14マス目=強度1、15マス目で0（単調減衰）」)。(2) `tickTorch` に 1.13 忠実な「下段ダスト(strength>0)で消灯」を追加(上段からの給電はダストに効かないため安定)。新規テスト2件(点灯ダスト上のトーチ1tickで消灯 / 非点灯ダスト上は点灯維持)。全162テスト合格、ビルド合格
 - [redstone] **Phase 5A 完了**: 1.13 完全版データ層+電力モデル(新規ブロック Hopper/DaylightDetector/Tnt/NoteBlock/Rail/PoweredRail/Tripwire + 既存 TripwireHook/Dispenser/Dropper/OakDoor 全実装)、dust-上ブロック弱給電+全ワールドアクティブ領域(疎レジストリ+変更チャンク増分スキャン)、昼夜サイクル(time.ts 24000tick/日)、ドア(上下2半分+1.13電力ルール+手動トグル+ソリッド性)、トリップワイヤ(接続/トリガー/切断+弦アイテム)、パワーレール。誤期待テスト2件を判定どおりに修正(プレート=純センサー / ドアは直下ダストで開く)。全209テスト合格、ビルド合格。5B 契約4件(hasItems / TNT着火 / note pitch / コンテナGUI)を「Phase 5A 実装メモ」節に明記
 - [fixes] **ユーザー報告バグ2件修正**: (1) インベントリスロットクリック無効 — `#hud{pointer-events:none}`(index.html)が子要素も食っており、`src/ui/inventoryUI.ts` の `.inventory-panel` ルールに `pointer-events:auto` を追加(スロットはパネルから継承、ホットバーと同パターン)。(2) 水から出られない — `src/player/physics.ts` の `WATER_JUMP_VELOCITY` を 4.5→9 に(9²/60=1.35ブロックで1段の岸を越えられる。ジャンプ維持で毎tick vy=9 更新のため深水の底から表面への上昇も保証。持続上昇キャップ案は岸越え要件(1.0ブロック)と両立しないため未採用)。新規テスト2件(1段岸ジャンプ脱出 / 5段プール水面到達)。全164テスト合格、ビルド合格
+- [redstone] **Phase 5B 完了**: 1.13 コンテナ中身系(Hopper 5/Dropper・Dispenser 9、piston 移動追従+破壊時中身返却+GUI)、TNT(着火80tick→半径4爆発・bedrock無傷・距離減衰ダメージ・爆発音+フラッシュ・給電立ち上がり着火・fuse 不可取消)、ノートブロック(pitch 0-24 サイクル+上段ブロック音色)、piston プレイヤー2HPダメージ、verify 第3シーン(redstone-full)。新規 `containers.ts`/`containerUI.ts`+`test/redstone5b.test.ts`(16)。全225テスト合格、ビルド合格、verify 3枚目視確認。詳細は「Phase 5B 実装メモ」節を参照
 
 ## Phase 1 実装メモ (Phase 2 チーム必読)
 

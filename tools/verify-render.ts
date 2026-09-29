@@ -23,7 +23,7 @@ import { World } from '../src/world/world';
 import { createTerrainGenerator, columnProfile } from '../src/world/terrain';
 import { buildChunkMeshData } from '../src/world/mesher';
 import type { FaceData } from '../src/world/mesher';
-import { Block, AIR, getRepeaterOut, setDelay } from '../src/world/blocks';
+import { Block, AIR, Facing, getRepeaterOut, setDelay, setNotePitch } from '../src/world/blocks';
 import { Redstone } from '../src/redstone/tick';
 import type { RedstoneCtx } from '../src/redstone/types';
 import { renderScene, encodePng, buildSoftwareAtlas } from './rasterizer';
@@ -301,6 +301,98 @@ function renderRedstoneScene(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Scene 3: complete 1.13 circuit (Phase 5B) on a flat stone platform
+// ---------------------------------------------------------------------------
+
+function renderRedstoneFullScene(): void {
+  const t0 = performance.now();
+  const world = new World(7, () => {}); // all air
+
+  // 14x14 stone floor at y=0 (inside chunk (0,0))
+  for (let x = 0; x < 14; x++) for (let z = 0; z < 14; z++) world.setBlock(x, 0, z, Block.Stone);
+
+  // main circuit at y=1, z=3: button → 3 dust → repeater(east, delay 2)
+  //   → piston(east) pushing a stone block
+  world.setBlock(1, 1, 3, Block.StoneButton);
+  for (let x = 2; x <= 4; x++) world.setBlock(x, 1, 3, Block.RedstoneDust);
+  world.setBlock(5, 1, 3, Block.Repeater, setDelay(Facing.East, 2));
+  world.setBlock(6, 1, 3, Block.Piston, Facing.East);
+  world.setBlock(8, 1, 3, Block.Stone); // the block the piston will push
+
+  // lit lamp row: redstone blocks (x 1..5, y=1, z=6) + lamps (z=7)
+  for (let x = 1; x <= 5; x++) {
+    world.setBlock(x, 1, 6, Block.RedstoneBlock);
+    world.setBlock(x, 1, 7, Block.RedstoneLamp);
+  }
+
+  // open door (bottom y=2, top y=3) powered by a redstone block below (y=1)
+  world.setBlock(9, 1, 10, Block.RedstoneBlock);
+  world.setBlock(9, 2, 10, Block.OakDoor, 0);
+  world.setBlock(9, 3, 10, Block.OakDoor, 0x02);
+
+  // primed TNT (renders white) beside an unprimed one (2 apart for clarity)
+  world.setBlock(11, 1, 10, Block.Tnt);
+  world.setBlock(13, 1, 10, Block.Tnt);
+
+  // note block + daylight detector
+  world.setBlock(11, 1, 6, Block.NoteBlock, setNotePitch(0, 12));
+  world.setBlock(13, 1, 6, Block.DaylightDetector);
+
+  const redstone = new Redstone();
+  const ctx: RedstoneCtx = {
+    entityAbove: () => false,
+    playerX: 7,
+    playerY: 3,
+    playerZ: 7,
+    worldTime: 6000, // noon → the daylight detector outputs 15
+  };
+  redstone.pressButton(world, 1, 1, 3); // arms the button (10 ticks)
+  redstone.primeTnt(world, 11, 1, 10); // prime the first TNT (white)
+  for (let i = 0; i < 6; i++) redstone.tick(world, ctx); // extend piston, light lamps, open door
+
+  const chunk = world.ensureChunk(0, 0);
+  if (!chunk) throw new Error('scene chunk missing');
+  const data = buildChunkMeshData(chunk, 0, 0, (x, y, z) => world.getBlock(x, y, z)).opaque;
+  const meshMs = performance.now() - t0;
+
+  // camera: look at the scene center (7,1,6) from a north-east, 52° overhead
+  // angle — steep enough that the flat floor is not viewed obliquely (a far /
+  // shallow camera triggers coplanar-floor depth artifacts in the rasterizer).
+  const cx = 7, cy = 1, cz = 6;
+  const dist = 10;
+  const elev = (52 * Math.PI) / 180;
+  const horiz = dist * Math.cos(elev);
+  const up = dist * Math.sin(elev);
+  const camera: Camera = {
+    x: cx + horiz / Math.SQRT2,
+    y: cy + up,
+    z: cz + horiz / Math.SQRT2,
+    yaw: Math.PI / 4, // looking toward -X -Z
+    pitch: -elev,
+    fovY: FOV_Y,
+  };
+
+  const result = renderScene([data], camera, {
+    width: 1280,
+    height: 720,
+    sky: SKY,
+    fog: null,
+    atlas: buildSoftwareAtlas(),
+  });
+  const renderMs = performance.now() - t0 - meshMs;
+  const png = encodePng(result.width, result.height, result.pixels);
+  const rel = writePng('verify-redstone-full.png', png);
+
+  const pistonExtended = world.getBlock(9, 1, 3) === Block.Stone;
+  const lampLit = world.getMeta(5, 1, 7) === 1;
+  const doorOpen = (world.getMeta(9, 2, 10) & 0x04) !== 0;
+  const tntPrimed = (world.getMeta(11, 1, 10) & 0x01) !== 0;
+  console.log(`[redstone-full] piston pushed block=${pistonExtended} lamp lit=${lampLit} door open=${doorOpen} TNT primed=${tntPrimed}`);
+  console.log(`[redstone-full] triangles=${result.triangleCount} rasterized=${result.rasterizedTriangles} non-sky=${result.nonSkyPixels} (${((100 * result.nonSkyPixels) / (result.width * result.height)).toFixed(1)}%)`);
+  console.log(`[redstone-full] mesh=${meshMs.toFixed(0)}ms render=${renderMs.toFixed(0)}ms png=${png.length}B -> ${rel}`);
+}
+
+// ---------------------------------------------------------------------------
 
 if (process.argv[1]?.endsWith('verify-render.ts') || process.argv[1]?.endsWith('verify-render.mjs')) {
   console.log('WebCraft CPU render verification (no browser)');
@@ -308,6 +400,8 @@ if (process.argv[1]?.endsWith('verify-render.ts') || process.argv[1]?.endsWith('
   renderTerrainScene();
   console.log('-'.repeat(60));
   renderRedstoneScene();
+  console.log('-'.repeat(60));
+  renderRedstoneFullScene();
   console.log('='.repeat(60));
   console.log('done.');
 }

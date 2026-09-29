@@ -45,14 +45,17 @@ import {
   isDoorTop,
   setDaylightInverted,
   isDaylightInverted,
+  getNotePitch,
+  setNotePitch,
   setDelay,
   setMode,
   setOn,
 } from './world/blocks';
 import { CHUNK_SIZE_X, CHUNK_SIZE_Z } from './world/chunk';
 import { Redstone } from './redstone/tick';
+import { isContainerId } from './redstone/containers';
 import { facingFromYaw, type RedstoneCtx } from './redstone/types';
-import { Inventory } from './player/inventory';
+import { Inventory, MAX_STACK, SLOT_COUNT, HOTBAR_SIZE, type ItemStack } from './player/inventory';
 import {
   ModeManager,
   GameMode,
@@ -72,6 +75,7 @@ import {
 import { Sfx } from './audio/sfx';
 import { Hotbar, StatusBars, MineBar } from './ui/hotbar';
 import { InventoryUI } from './ui/inventoryUI';
+import { ContainerUI } from './ui/containerUI';
 import { DebugPanel, facingName } from './ui/debug';
 
 export const REACH = 6.0; // eye reach, design.md §7
@@ -180,6 +184,7 @@ export class Game {
   readonly hotbar: Hotbar;
   readonly status: StatusBars;
   readonly inventoryUI: InventoryUI;
+  readonly containerUI: ContainerUI;
   readonly debug: DebugPanel;
   readonly mineBar: MineBar;
   readonly redstone = new Redstone();
@@ -205,6 +210,9 @@ export class Game {
   private spaceTracker = new DoublePressTracker();
   private flyVel = 0;
   private invSelection = -1;
+  // Phase 5B: container GUI state (which container is open + pick-up selection)
+  private containerPos: { x: number; y: number; z: number } | null = null;
+  private containerSelection = -1;
 
   constructor(canvas: HTMLCanvasElement, seed?: number) {
     this.canvas = canvas;
@@ -224,9 +232,11 @@ export class Game {
     this.hotbar = new Hotbar(hudRoot);
     this.status = new StatusBars(hudRoot);
     this.inventoryUI = new InventoryUI(hudRoot);
+    this.containerUI = new ContainerUI(hudRoot);
     this.debug = new DebugPanel(hudRoot);
     this.mineBar = new MineBar(hudRoot);
     this.inventoryUI.onSlotClick = (i, shift) => this.onSlotClick(i, shift);
+    this.containerUI.onSlotClick = (i, shift) => this.onContainerSlotClick(i, shift);
     this.hotbar.onSlotClick = (i, shift) => this.onSlotClick(i, shift);
     this.giveStarterKit();
     this.input = new Input(canvas, {
@@ -420,8 +430,23 @@ export class Game {
       playerY: p.y,
       playerZ: p.z,
       worldTime: this.clock.time,
-      // 5B contract: wire the real container item system here.
-      hasItems: () => false,
+      // 5B: wire the real container item system (content presence → power).
+      hasItems: (x, y, z) => this.redstone.containers.hasItems(x, y, z),
+      // 5B: TNT / piston player damage (survival only).
+      onPlayerDamage: (amount, cause) => {
+        if (this.modes.isCreative) return;
+        this.sfx.play(cause === 'tnt' ? 'boom' : 'hit');
+        if (this.vitals.damage(amount)) this.respawn();
+      },
+      // 5B: TNT explosion SFX + distance-scaled screen flash.
+      onExplosion: (_x, _y, _z, dist) => {
+        this.sfx.play('boom');
+        this.flash(Math.max(0, 1 - dist / 8));
+      },
+      // 5B: note block plays a note (pitch + block above for timbre).
+      onNotePlay: (pitch, blockAbove) => {
+        this.sfx.playNote(pitch, blockAbove);
+      },
       entityAbove: (x, y, z) =>
         Player.boxesIntersect(p.getAABB(), { minX: x, minY: y, minZ: z, maxX: x + 1, maxY: y + 1, maxZ: z + 1 }),
     };
@@ -560,7 +585,12 @@ export class Game {
         this.setBlock(x, otherY, z, AIR);
       }
     }
-    this.setBlock(x, y, z, AIR);
+    // Phase 5B: breaking a container returns its CONTENTS to the player
+    // inventory (survival only; creative breaks instantly with no drops).
+    if (isContainerId(id) && !this.modes.isCreative) {
+      this.redstone.drainContainerToInventory(x, y, z, (itemId, count) => this.inventory.addItem(itemId, count));
+    }
+    this.setBlock(x, y, z, AIR); // → worldEdit → reconcile destroys the state
     if (def.drop !== 0) this.inventory.addItem(def.drop, 1);
     this.sfx.play('break');
     this.mineBar.set(0);
@@ -635,6 +665,20 @@ export class Game {
         }
         return false;
       }
+      case Block.NoteBlock: {
+        // 1.13: right-click cycles the pitch +1 over the 0..24 range (24→0)
+        // AND plays the note at the new pitch.
+        const next = (getNotePitch(meta) + 1) % 25;
+        this.setBlock(hit.x, hit.y, hit.z, id, setNotePitch(meta, next));
+        this.sfx.playNote(next, this.world.getBlock(hit.x, hit.y + 1, hit.z));
+        return true;
+      }
+      case Block.Hopper:
+      case Block.Dropper:
+      case Block.Dispenser:
+        // 1.13 (§8.5): right-click opens the container GUI.
+        this.openContainerUI(hit.x, hit.y, hit.z);
+        return true;
       default:
         return false;
     }
@@ -753,13 +797,134 @@ export class Game {
     this.refreshHud();
   }
 
+  // --- container GUI (E / Esc, Phase 5B §8.5) --------------------------------
+
+  /** Right-click a hopper/dropper/dispenser: open its content GUI. */
+  private openContainerUI(x: number, y: number, z: number): void {
+    if (this.inventoryUI.isOpen() || !this.redstone.getContainerSlots(x, y, z)) return;
+    this.containerPos = { x, y, z };
+    this.containerSelection = -1;
+    this.containerUI.open(this.redstone.containerSlotCount(x, y, z));
+    this.hotbar.setInteractive(false);
+    if (document.pointerLockElement) document.exitPointerLock();
+    this.refreshHud();
+  }
+
+  private closeContainerUI(): void {
+    if (!this.containerPos) return;
+    this.containerPos = null;
+    this.containerSelection = -1;
+    this.containerUI.close();
+    try {
+      this.canvas.requestPointerLock();
+    } catch {
+      // pointer lock can be refused right after release; user clicks canvas
+    }
+    this.refreshHud();
+  }
+
+  /**
+   * Click on a container GUI slot. Global index space: 0..N-1 = the container's
+   * slots, N..N+35 = the player's main storage (inventory slots 9..44; the
+   * hotbar is shown separately). Supports pick-up, move/swap/merge (both
+   * directions) and shift-move between the two.
+   */
+  private onContainerSlotClick(slot: number, shift: boolean): void {
+    const pos = this.containerPos;
+    if (!pos) return;
+    const N = this.redstone.containerSlotCount(pos.x, pos.y, pos.z);
+    const cont = this.redstone.getContainerSlots(pos.x, pos.y, pos.z);
+    if (!cont) return;
+    const MAIN = SLOT_COUNT - HOTBAR_SIZE; // 36 main-storage slots
+    const playerIdx = (g: number) => g - N + HOTBAR_SIZE; // global → inventory slot
+    const getStack = (g: number): ItemStack | null => (g < N ? cont[g] : this.inventory.get(playerIdx(g)));
+    const setStack = (g: number, s: ItemStack | null): void => {
+      if (g < N) cont[g] = s;
+      else this.inventory.set(playerIdx(g), s);
+    };
+    if (shift) {
+      const a = getStack(slot);
+      if (!a) return;
+      // merge `a` into the opposite side (container → player, player → container)
+      const toPlayer = slot < N;
+      const start = toPlayer ? N : 0;
+      const end = toPlayer ? N + MAIN : N;
+      let remaining = a.count;
+      for (let i = start; i < end && remaining > 0; i++) {
+        const t = getStack(i);
+        if (t && t.id === a.id && t.count < MAX_STACK) {
+          const take = Math.min(MAX_STACK - t.count, remaining);
+          t.count += take;
+          remaining -= take;
+        }
+      }
+      for (let i = start; i < end && remaining > 0; i++) {
+        if (!getStack(i)) {
+          setStack(i, { id: a.id, count: remaining });
+          remaining = 0;
+          break;
+        }
+      }
+      if (remaining < a.count) setStack(slot, null);
+    } else if (this.containerSelection === -1) {
+      if (getStack(slot)) this.containerSelection = slot;
+    } else if (this.containerSelection === slot) {
+      this.containerSelection = -1;
+    } else {
+      const a = getStack(this.containerSelection);
+      const b = getStack(slot);
+      if (a) {
+        if (!b) {
+          setStack(slot, a);
+          setStack(this.containerSelection, null);
+        } else if (b.id === a.id && a.count + b.count <= MAX_STACK) {
+          b.count += a.count;
+          setStack(this.containerSelection, null);
+        } else {
+          setStack(slot, a);
+          setStack(this.containerSelection, b);
+        }
+      }
+      this.containerSelection = -1;
+    }
+    this.refreshHud();
+  }
+
+  /**
+   * Phase 5B: a brief full-screen white flash for TNT explosions. UI-only — a
+   * CSS-transition div on the HUD root that fades out (intensity 0..1 scales
+   * by distance). No effect on game logic.
+   */
+  private flash(intensity: number): void {
+    if (typeof document === 'undefined' || intensity <= 0) return;
+    const root = document.getElementById('hud') ?? document.body;
+    const el = document.createElement('div');
+    el.style.cssText = `position:fixed;inset:0;background:#fff;opacity:${Math.min(1, intensity).toFixed(3)};pointer-events:none;transition:opacity 0.3s ease-out;z-index:9999;`;
+    root.appendChild(el);
+    requestAnimationFrame(() => {
+      el.style.opacity = '0';
+    });
+    setTimeout(() => {
+      root.removeChild(el);
+    }, 350);
+  }
+
   // --- extra input (mining hold, double-Space fly, inventory, SFX unlock) -----
 
   private onKeyDownExtra = (e: KeyboardEvent): void => {
     this.sfx.ensure();
     if (e.repeat) return;
-    if (e.code === 'KeyE') this.toggleInventoryUI();
-    if (e.code === 'Escape' && this.inventoryUI.isOpen()) this.closeInventoryUI();
+    if (e.code === 'KeyE') {
+      // Phase 5B: E toggles the container GUI when it is open, else the inventory.
+      if (this.containerUI.isOpen()) this.closeContainerUI();
+      else this.toggleInventoryUI();
+      return;
+    }
+    if (e.code === 'Escape') {
+      if (this.containerUI.isOpen()) this.closeContainerUI();
+      else if (this.inventoryUI.isOpen()) this.closeInventoryUI();
+      return;
+    }
     if (e.code === 'Space' && this.input.locked && this.modes.isCreative) {
       if (this.spaceTracker.press(performance.now())) this.toggleFly();
     }
@@ -794,6 +959,9 @@ export class Game {
   private refreshHud(): void {
     this.hotbar.update(this.inventory, this.selectedSlot);
     this.inventoryUI.update(this.inventory, this.invSelection);
+    if (this.containerPos) {
+      this.containerUI.update(this.redstone.getContainerSlots(this.containerPos.x, this.containerPos.y, this.containerPos.z), this.inventory, this.containerSelection);
+    }
     this.status.update(this.vitals.hp, this.vitals.hunger, !this.modes.isCreative);
     this.debug.update({
       x: this.player.x,

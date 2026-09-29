@@ -51,6 +51,23 @@ export interface RedstoneCtx {
    * (5A has no content system; 5B wires the real containers here).
    */
   hasItems?(x: number, y: number, z: number): boolean;
+  /**
+   * Phase 5B: a player took damage (TNT explosion, piston push). The game
+   * applies it to the vitals (survival only). `cause` distinguishes the two
+   * 1.13 damage sources for SFX/handling.
+   */
+  onPlayerDamage?(amount: number, cause: 'tnt' | 'piston'): void;
+  /**
+   * Phase 5B: a TNT exploded at (x,y,z). `dist` is the distance from the
+   * explosion center to the player's AABB center — the game scales the
+   * screen flash by it (SFX + flash only; damage is via onPlayerDamage).
+   */
+  onExplosion?(x: number, y: number, z: number, dist: number): void;
+  /**
+   * Phase 5B: a note block plays a note — `pitch` 0-24 (frequency
+   * `80 * 2^(pitch/12)` Hz) and the id of the block directly above (timbre).
+   */
+  onNotePlay?(pitch: number, blockAbove: number): void;
 }
 
 /** Full signal strength (design.md §8.1: power sources output 15). */
